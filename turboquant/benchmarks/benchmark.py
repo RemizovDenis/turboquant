@@ -22,9 +22,9 @@ CLI::
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
-import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -52,11 +52,7 @@ try:
 except ImportError:
     _HAS_PLOTLY = False
 
-try:
-    import pynvml  # type: ignore[import-untyped]
-    _HAS_NVML = True
-except ImportError:
-    _HAS_NVML = False
+_HAS_NVML = importlib.util.find_spec("pynvml") is not None
 
 
 # ======================================================================
@@ -183,10 +179,7 @@ def speed_benchmark(
     """
     if seq_lengths is None:
         device = _detect_device()
-        if device == "cuda":
-            seq_lengths = [1024, 4096, 16384, 65536]
-        else:
-            seq_lengths = [256, 1024, 4096]
+        seq_lengths = [1024, 4096, 16384, 65536] if device == "cuda" else [256, 1024, 4096]
 
     device = _detect_device()
     rows: list[dict[str, Any]] = []
@@ -299,14 +292,14 @@ def quality_benchmark(
         recalls_tq = 0
         actual_trials = 0
 
-        for trial in range(num_trials):
+        for _trial in range(num_trials):
             try:
                 # Generate haystack
                 shape = (1, 1, sl, config.head_dim)
                 haystack = torch.randn(shape, dtype=torch.float16, device=device)
 
                 # Insert needle
-                needle_pos = torch.randint(0, sl, (1,)).item()
+                needle_pos = int(torch.randint(0, sl, (1,)).item())
                 needle = torch.randn(1, 1, 1, config.head_dim, dtype=torch.float16, device=device) * 5
                 haystack[:, :, needle_pos : needle_pos + 1, :] = needle
 
@@ -323,7 +316,7 @@ def quality_benchmark(
                 sims = torch.nn.functional.cosine_similarity(
                     recon_flat, needle_flat.unsqueeze(0), dim=1
                 )
-                best_pos = sims.argmax().item()
+                best_pos = int(sims.argmax().item())
                 if best_pos == needle_pos:
                     recalls_tq += 1
 
@@ -358,7 +351,7 @@ def vps_benchmark(config: TurboQuantConfig) -> pd.DataFrame:
         ``monthly_cost_tq``, ``monthly_savings``.
     """
     # Typical model profiles (params in billions)
-    models = [
+    models: list[dict[str, str | float]] = [
         {"model": "Llama-3-8B", "params_b": 8, "kv_per_token_bytes": 0.5},
         {"model": "Llama-3-13B", "params_b": 13, "kv_per_token_bytes": 0.75},
         {"model": "Mistral-7B", "params_b": 7, "kv_per_token_bytes": 0.5},
@@ -373,10 +366,13 @@ def vps_benchmark(config: TurboQuantConfig) -> pd.DataFrame:
 
     rows: list[dict[str, Any]] = []
     for m in models:
+        params_b = float(m["params_b"])
+        kv_per_token_bytes = float(m["kv_per_token_bytes"])
+        model_name = str(m["model"])
         # Model weights in FP16
-        weights_gb = m["params_b"] * 2  # 2 bytes per param
+        weights_gb = params_b * 2  # 2 bytes per param
         # KV-cache for 32k context
-        kv_fp16_gb = m["kv_per_token_bytes"] * 32768 / (1024**3) * 2  # K+V
+        kv_fp16_gb = kv_per_token_bytes * 32768 / (1024**3) * 2  # K+V
         kv_fp16_gb = max(kv_fp16_gb, weights_gb * 0.15)  # at least 15% of weights
 
         total_fp16 = weights_gb + kv_fp16_gb
@@ -388,8 +384,8 @@ def vps_benchmark(config: TurboQuantConfig) -> pd.DataFrame:
         cost_tq = total_tq * cost_per_gb_month
 
         rows.append({
-            "model": m["model"],
-            "params_b": m["params_b"],
+            "model": model_name,
+            "params_b": params_b,
             "fp16_ram_gb": round(total_fp16, 2),
             "tq_ram_gb": round(total_tq, 2),
             "savings_gb": round(savings_gb, 2),

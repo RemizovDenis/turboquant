@@ -22,10 +22,11 @@ import asyncio
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import Any
 
 import numpy as np
 import structlog
+import torch
 
 from turboquant.core.turboquant import TurboQuantConfig, TurboQuantKVCache
 
@@ -181,7 +182,7 @@ class TurboQuantVectorAdapter(abc.ABC):
 
     # ---- helpers ----
 
-    def _vectors_to_torch(self, vectors: np.ndarray) -> "torch.Tensor":
+    def _vectors_to_torch(self, vectors: np.ndarray) -> torch.Tensor:
         """Convert numpy vectors to torch tensor shaped for TurboQuant.
 
         The TurboQuant compressor expects ``[batch, heads, seq, head_dim]``.
@@ -195,9 +196,9 @@ class TurboQuantVectorAdapter(abc.ABC):
         # → [N, 1, 1, dim]
         return t.unsqueeze(1).unsqueeze(1)
 
-    def _torch_to_vectors(self, tensor: "torch.Tensor") -> np.ndarray:
+    def _torch_to_vectors(self, tensor: torch.Tensor) -> np.ndarray:
         """Convert [N, 1, 1, dim] torch tensor back to (N, dim) numpy."""
-        return tensor.squeeze(1).squeeze(1).float().cpu().numpy()
+        return np.asarray(tensor.squeeze(1).squeeze(1).float().cpu().numpy(), dtype=np.float32)
 
 
 # ======================================================================
@@ -226,7 +227,6 @@ class InMemoryTurboQuant(TurboQuantVectorAdapter):
         ids: list[str] | None = None,
         metadata: list[dict[str, Any]] | None = None,
     ) -> CompressedVectors:
-        import torch
 
         if vectors.ndim == 1:
             vectors = vectors.reshape(1, -1)
@@ -278,6 +278,7 @@ class InMemoryTurboQuant(TurboQuantVectorAdapter):
 
     def decompress_embeddings(self, compressed: CompressedVectors) -> np.ndarray:
         import torch
+
         from turboquant.core.turboquant import CacheEntry
 
         qk = torch.from_numpy(compressed.quantized)
@@ -378,8 +379,6 @@ class ChromaDBTurboQuant(TurboQuantVectorAdapter):
         ids: list[str] | None = None,
         metadata: list[dict[str, Any]] | None = None,
     ) -> CompressedVectors:
-        import base64
-
         if vectors.ndim == 1:
             vectors = vectors.reshape(1, -1)
         n, dim = vectors.shape
@@ -392,13 +391,11 @@ class ChromaDBTurboQuant(TurboQuantVectorAdapter):
         # Compress via in-memory adapter
         compressed = self._fallback.compress_embeddings(vectors, ids, metadata)
 
-        # Store in ChromaDB: use original vectors for HNSW index,
-        # compressed data in metadata for storage savings awareness
-        encoded_q = base64.b64encode(compressed.quantized.tobytes()).decode("ascii")
-        encoded_s = base64.b64encode(compressed.scales.tobytes()).decode("ascii")
+        # Store in ChromaDB: use original vectors for HNSW index and
+        # lightweight compressed-shape metadata for observability.
 
         enriched_meta = []
-        for i, m in enumerate(metadata):
+        for m in metadata:
             em = dict(m)
             em["_tq_q_shape"] = str(list(compressed.quantized.shape))
             em["_tq_s_shape"] = str(list(compressed.scales.shape))
@@ -433,7 +430,7 @@ class ChromaDBTurboQuant(TurboQuantVectorAdapter):
             ids = results["ids"][0]
             distances = results["distances"][0] if results.get("distances") else [0.0] * len(ids)
             metadatas = results["metadatas"][0] if results.get("metadatas") else [{}] * len(ids)
-            for rid, dist, meta in zip(ids, distances, metadatas):
+            for rid, dist, meta in zip(ids, distances, metadatas, strict=False):
                 # ChromaDB returns distance; convert to similarity
                 score = 1.0 - dist if dist <= 1.0 else 1.0 / (1.0 + dist)
                 # Remove internal keys from metadata
@@ -514,7 +511,6 @@ class QdrantTurboQuant(TurboQuantVectorAdapter):
         ids: list[str] | None = None,
         metadata: list[dict[str, Any]] | None = None,
     ) -> CompressedVectors:
-        import base64
 
         from qdrant_client.models import PointStruct  # type: ignore[import-untyped]
 
@@ -536,10 +532,7 @@ class QdrantTurboQuant(TurboQuantVectorAdapter):
             payload = dict(metadata[i]) if i < len(metadata) else {}
             payload["_tq_compressed"] = True
             vec = vectors[i].tolist()
-            if self._vector_name:
-                vector_data = {self._vector_name: vec}
-            else:
-                vector_data = vec
+            vector_data = {self._vector_name: vec} if self._vector_name else vec
 
             points.append(
                 PointStruct(
@@ -617,17 +610,18 @@ def create_adapter(
     Raises:
         ValueError: If *backend* is not recognised.
     """
-    backends = {
-        "memory": InMemoryTurboQuant,
-        "chroma": ChromaDBTurboQuant,
-        "qdrant": QdrantTurboQuant,
-    }
-    cls = backends.get(backend.lower())
-    if cls is None:
-        raise ValueError(
-            f"Unknown backend '{backend}'. Supported: {', '.join(sorted(backends))}"
-        )
-    return cls(config, **kwargs)
+    backend_name = backend.lower()
+    if backend_name == "memory":
+        return InMemoryTurboQuant(config, **kwargs)
+    if backend_name == "chroma":
+        return ChromaDBTurboQuant(config, **kwargs)
+    if backend_name == "qdrant":
+        return QdrantTurboQuant(config, **kwargs)
+
+    supported = ", ".join(sorted(["chroma", "memory", "qdrant"]))
+    raise ValueError(
+        f"Unknown backend '{backend}'. Supported: {supported}"
+    )
 
 
 # ======================================================================
@@ -679,7 +673,7 @@ def benchmark_vector_db(
     # (since we're searching with vectors from the dataset)
     recall_hits = 0
     ids = compressed.ids
-    for qi, results in zip(query_indices, all_results):
+    for qi, results in zip(query_indices, all_results, strict=False):
         result_ids = {r.id for r in results}
         if qi < len(ids) and ids[qi] in result_ids:
             recall_hits += 1

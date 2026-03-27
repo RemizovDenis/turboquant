@@ -25,11 +25,10 @@ Configuration via environment variables (see ``.env.example``)::
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import signal
 import time
-from typing import Any
+from contextlib import suppress
 
 import aiohttp
 import aiohttp.web
@@ -89,10 +88,8 @@ class OllamaMemoryMonitor:
         self._running = False
         if self._task is not None:
             self._task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
         log.info("OllamaMemoryMonitor.stop")
 
     async def _poll_loop(self) -> None:
@@ -301,7 +298,7 @@ class OllamaTurboQuantProxy:
                             },
                             body=resp_body,
                         )
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except (TimeoutError, aiohttp.ClientError) as exc:
                 last_exc = exc
                 self._requests_errors += 1
                 wait = 2**attempt

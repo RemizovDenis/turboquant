@@ -13,9 +13,8 @@ Typical usage::
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
-from typing import Optional
+from typing import Any, cast
 
 import numpy as np
 import structlog
@@ -123,7 +122,7 @@ class PolarQuantizer(nn.Module):
         diag_sign = torch.sign(torch.diag(r))
         diag_sign[diag_sign == 0] = 1.0
         q = q * diag_sign.unsqueeze(0)
-        return q
+        return cast(torch.Tensor, q)
 
     # ------------------------------------------------------------------
     # Lloyd-Max codebook via Beta distribution
@@ -238,9 +237,10 @@ class PolarQuantizer(nn.Module):
             raise ValueError("calibration_data must be a non-empty list of tensors.")
 
         all_vals: list[torch.Tensor] = []
+        rotation = cast(torch.Tensor, self.rotation)
         for tensor in calibration_data:
-            t = tensor.float().to(self.rotation.device)
-            t_rot = t @ self.rotation.T
+            t = tensor.float().to(rotation.device)
+            t_rot = t @ rotation.T
             all_vals.append(t_rot.reshape(-1))
 
         merged = torch.cat(all_vals)
@@ -249,13 +249,18 @@ class PolarQuantizer(nn.Module):
             return
 
         alpha, beta_param = self._fit_beta_moments(merged)
-        self.beta_alpha.fill_(alpha)
-        self.beta_beta.fill_(beta_param)
+        beta_alpha = cast(torch.Tensor, self.beta_alpha)
+        beta_beta = cast(torch.Tensor, self.beta_beta)
+        levels_buf = cast(torch.Tensor, self.levels)
+        boundaries_buf = cast(torch.Tensor, self.boundaries)
+        calibrated_buf = cast(torch.Tensor, self.calibrated)
+        beta_alpha.fill_(alpha)
+        beta_beta.fill_(beta_param)
 
         levels, boundaries = self._lloyd_max_from_beta(alpha, beta_param, self.num_levels)
-        self.levels.copy_(levels.to(self.levels.device))
-        self.boundaries.copy_(boundaries.to(self.boundaries.device))
-        self.calibrated.fill_(1)
+        levels_buf.copy_(levels.to(levels_buf.device))
+        boundaries_buf.copy_(boundaries.to(boundaries_buf.device))
+        calibrated_buf.fill_(1)
 
         log.info(
             "calibrate",
@@ -306,7 +311,8 @@ class PolarQuantizer(nn.Module):
         # 1. Rotate
         x_float = x.float()
         # rotation is (head_dim, head_dim), x has last dim = head_dim
-        x_rot = x_float @ self.rotation.T
+        rotation = cast(torch.Tensor, self.rotation)
+        x_rot = x_float @ rotation.T
 
         # 2. Reshape for grouping: (..., num_groups, group_size)
         flat = x_rot.reshape(-1, self.head_dim)
@@ -325,14 +331,15 @@ class PolarQuantizer(nn.Module):
         num_groups = padded_dim // self.group_size
         grouped = flat.reshape(total_elements, num_groups, self.group_size)
 
-        # 3. Per-group scale  
+        # 3. Per-group scale
         scales = grouped.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12)  # (N, G, 1)
         normalized = grouped / scales  # in [-1, 1]
 
         # 4. Quantize: find nearest level
         # boundaries shape: (num_levels - 1,)
         # Use searchsorted to map each normalized value to a bucket index
-        bnd = self.boundaries.to(normalized.device)
+        boundaries = cast(torch.Tensor, self.boundaries)
+        bnd = boundaries.to(normalized.device)
         flat_norm = normalized.reshape(-1)
         indices = torch.searchsorted(bnd, flat_norm).to(torch.int8)
         quantized_grouped = indices.reshape(grouped.shape)
@@ -382,7 +389,7 @@ class PolarQuantizer(nn.Module):
             return torch.empty_like(quantized, dtype=torch.float16)
 
         original_shape = quantized.shape
-        levels = self.levels.to(quantized.device)
+        levels = cast(torch.Tensor, self.levels).to(quantized.device)
 
         # Map indices back to level values
         idx = quantized.long().clamp(0, self.num_levels - 1)
@@ -417,7 +424,7 @@ class PolarQuantizer(nn.Module):
         rescaled_out = rescaled_flat.reshape(original_shape)
 
         # Inverse rotation: X = X_rot @ Π  (since Π is orthogonal, Π^{-1} = Π^T)
-        rotation_inv = self.rotation.to(rescaled_out.device)  # Π
+        rotation_inv = cast(torch.Tensor, self.rotation).to(rescaled_out.device)  # Π
         result = rescaled_out @ rotation_inv  # X_rot @ Π = X_rot @ (Π^T)^T  → original space
 
         return result.to(torch.float16)
@@ -440,16 +447,17 @@ class PolarQuantizer(nn.Module):
                 "safetensors is required for save_calibration. "
                 "Install it with: pip install safetensors"
             )
-        tensors = {
-            "levels": self.levels.cpu(),
-            "boundaries": self.boundaries.cpu(),
-            "beta_alpha": self.beta_alpha.cpu().unsqueeze(0),
-            "beta_beta": self.beta_beta.cpu().unsqueeze(0),
-            "calibrated": self.calibrated.cpu().unsqueeze(0).float(),
-            "rotation": self.rotation.cpu(),
+        tensors: dict[str, torch.Tensor] = {
+            "levels": cast(torch.Tensor, self.levels).cpu(),
+            "boundaries": cast(torch.Tensor, self.boundaries).cpu(),
+            "beta_alpha": cast(torch.Tensor, self.beta_alpha).cpu().unsqueeze(0),
+            "beta_beta": cast(torch.Tensor, self.beta_beta).cpu().unsqueeze(0),
+            "calibrated": cast(torch.Tensor, self.calibrated).cpu().unsqueeze(0).float(),
+            "rotation": cast(torch.Tensor, self.rotation).cpu(),
         }
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        save_file(tensors, path)
+        save_file_fn = cast(Any, save_file)
+        save_file_fn(tensors, path)
         log.info("save_calibration", path=path)
 
     def load_calibration(self, path: str) -> None:
@@ -469,14 +477,22 @@ class PolarQuantizer(nn.Module):
             )
         if not Path(path).exists():
             raise FileNotFoundError(f"Calibration file not found: {path}")
-        tensors = load_file(path)
-        self.levels.copy_(tensors["levels"].to(self.levels.device))
-        self.boundaries.copy_(tensors["boundaries"].to(self.boundaries.device))
-        self.beta_alpha.copy_(tensors["beta_alpha"].squeeze().to(self.beta_alpha.device))
-        self.beta_beta.copy_(tensors["beta_beta"].squeeze().to(self.beta_beta.device))
-        self.calibrated.fill_(int(tensors["calibrated"].squeeze().item()))
+        load_file_fn = cast(Any, load_file)
+        tensors = cast(dict[str, torch.Tensor], load_file_fn(path))
+        levels = cast(torch.Tensor, self.levels)
+        boundaries = cast(torch.Tensor, self.boundaries)
+        beta_alpha = cast(torch.Tensor, self.beta_alpha)
+        beta_beta = cast(torch.Tensor, self.beta_beta)
+        calibrated = cast(torch.Tensor, self.calibrated)
+        rotation = cast(torch.Tensor, self.rotation)
+
+        levels.copy_(tensors["levels"].to(levels.device))
+        boundaries.copy_(tensors["boundaries"].to(boundaries.device))
+        beta_alpha.copy_(tensors["beta_alpha"].squeeze().to(beta_alpha.device))
+        beta_beta.copy_(tensors["beta_beta"].squeeze().to(beta_beta.device))
+        calibrated.fill_(int(tensors["calibrated"].squeeze().item()))
         if "rotation" in tensors:
-            self.rotation.copy_(tensors["rotation"].to(self.rotation.device))
+            rotation.copy_(tensors["rotation"].to(rotation.device))
         log.info("load_calibration", path=path)
 
     # ------------------------------------------------------------------
@@ -484,10 +500,11 @@ class PolarQuantizer(nn.Module):
     # ------------------------------------------------------------------
 
     def extra_repr(self) -> str:
+        calibrated = cast(torch.Tensor, self.calibrated)
         return (
             f"head_dim={self.head_dim}, bits={self.bits}, "
             f"group_size={self.group_size}, seed={self.seed}, "
-            f"calibrated={bool(self.calibrated.item())}"
+            f"calibrated={bool(calibrated.item())}"
         )
 
 
@@ -506,3 +523,9 @@ if __name__ == "__main__":
     mse = ((x.float() - recon.float()) ** 2).mean().item()
     print(f"MSE:       {mse:.6f}")
     print("✓ PolarQuantizer OK")
+    rotation: torch.Tensor
+    levels: torch.Tensor
+    boundaries: torch.Tensor
+    beta_alpha: torch.Tensor
+    beta_beta: torch.Tensor
+    calibrated: torch.Tensor

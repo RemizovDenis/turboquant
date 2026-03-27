@@ -19,7 +19,7 @@ Typical usage::
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import cast
 
 import structlog
 import torch
@@ -173,7 +173,7 @@ class QJLResidualCorrector(nn.Module):
                 f"Expected last dim {self.head_dim}, got {residual.shape[-1]}"
             )
 
-        proj = self.projection.to(residual.device)  # (sketch_dim, head_dim)
+        proj = cast(torch.Tensor, self.projection).to(residual.device)  # (sketch_dim, head_dim)
         # Project: (..., head_dim) @ (head_dim, sketch_dim) → (..., sketch_dim)
         projected = residual.float() @ proj.T  # (..., sketch_dim)
         # Sign → 0/1  (positive → 1, non-positive → 0)
@@ -214,7 +214,7 @@ class QJLResidualCorrector(nn.Module):
         if bits.numel() == 0:
             return torch.empty(original_shape, dtype=torch.float16, device=bits.device)
 
-        proj = self.projection.to(bits.device)
+        proj = cast(torch.Tensor, self.projection).to(bits.device)
 
         # Unpack
         sign_float = self._unpack_bits(bits, self.sketch_dim)  # (..., sketch_dim) in {0,1}
@@ -269,7 +269,6 @@ class QJLResidualCorrector(nn.Module):
 
 
 if __name__ == "__main__":
-    import pytest  # noqa: F811
 
     # ------------------------------------------------------------------
     # Inline tests
@@ -353,3 +352,4 @@ if __name__ == "__main__":
     test_different_sketch_dims()
     print("✓ test_different_sketch_dims")
     print("=== All tests passed ===")
+    projection: torch.Tensor

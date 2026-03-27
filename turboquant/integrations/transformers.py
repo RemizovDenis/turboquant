@@ -22,23 +22,22 @@ from __future__ import annotations
 import copy
 import warnings
 from contextlib import contextmanager
-from typing import Any, Optional
+from typing import Any
 
 import structlog
 import torch
 
+from turboquant.core.turboquant import CacheEntry, TurboQuantConfig, TurboQuantKVCache
+
 log = structlog.get_logger(__name__)
 
 try:
-    import transformers  # type: ignore[import-untyped]
     from transformers import PreTrainedModel  # type: ignore[import-untyped]
 
     _HAS_TRANSFORMERS = True
 except ImportError:
     _HAS_TRANSFORMERS = False
     PreTrainedModel = object  # type: ignore[assignment,misc]
-
-from turboquant.core.turboquant import CacheEntry, TurboQuantConfig, TurboQuantKVCache
 
 
 def _check_transformers() -> None:
@@ -288,9 +287,7 @@ def _patch_attention_module(
 
     def patched_forward(*args: Any, **kwargs: Any) -> Any:
         # Inject our cache if the caller didn't supply one
-        if "past_key_value" not in kwargs or kwargs["past_key_value"] is None:
-            kwargs["past_key_value"] = cache
-        elif kwargs.get("use_cache", True):
+        if "past_key_value" not in kwargs or kwargs["past_key_value"] is None or kwargs.get("use_cache", True):
             kwargs["past_key_value"] = cache
         return original_forward(*args, **kwargs)
 

@@ -22,7 +22,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -337,9 +337,14 @@ class TurboQuantKVCache(nn.Module):
 
         merged_rk: torch.Tensor | None = None
         merged_rv: torch.Tensor | None = None
-        if entry.residual_keys is not None and new_entry.residual_keys is not None:
+        if (
+            entry.residual_keys is not None
+            and new_entry.residual_keys is not None
+            and entry.residual_values is not None
+            and new_entry.residual_values is not None
+        ):
             merged_rk = torch.cat([entry.residual_keys, new_entry.residual_keys], dim=seq_dim)
-            merged_rv = torch.cat([entry.residual_values, new_entry.residual_values], dim=seq_dim)  # type: ignore[arg-type]
+            merged_rv = torch.cat([entry.residual_values, new_entry.residual_values], dim=seq_dim)
 
         # Update metadata
         old_shape = entry.metadata["original_shape"]
