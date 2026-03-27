@@ -1,0 +1,12 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "turboquant-proxy"
+    scrape_interval: 10s
+    metrics_path: "/tq/metrics"
+    static_configs:
+      - targets: ["turboquant-proxy:11435"]
+        labels:
+          service: "turboquant"
