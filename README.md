@@ -3,7 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/turboquant)](https://pypi.org/project/turboquant/)
 [![Python](https://img.shields.io/pypi/pyversions/turboquant)](https://pypi.org/project/turboquant/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![CI](https://github.com/remizovdenis/turboquant/actions/workflows/ci.yml/badge.svg)](https://github.com/remizovdenis/turboquant/actions)
+[![CI](https://github.com/RemizovDenis/turboquant/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/RemizovDenis/turboquant/actions/workflows/ci.yml)
 
 **Production-ready implementation of Google's TurboQuant algorithm: 4× memory reduction for LLM KV-cache with zero recall degradation.**
 
