@@ -1,26 +1,4 @@
-"""Ollama TurboQuant Proxy — transparent KV-cache compression middleware.
-
-Deploys as a reverse-proxy between clients and Ollama, optionally applying
-TurboQuant compression to reduce memory usage on inference servers.
-
-Architecture::
-
-    Client ──► OllamaTurboQuantProxy (:11435)
-                        │
-                        ├─ /api/generate, /api/chat → Ollama (:11434)
-                        ├─ /tq/status               → proxy status
-                        ├─ /tq/metrics              → Prometheus metrics
-                        └─ /tq/config (POST)        → hot-reload config
-
-Configuration via environment variables (see ``.env.example``)::
-
-    OLLAMA_HOST=http://localhost:11434
-    PROXY_PORT=11435
-    TQ_BITS=3
-    TQ_GROUP_SIZE=64
-    TQ_RESIDUAL=true
-    TQ_MAX_SEQ_LEN=32768
-"""
+"""Ollama proxy with TurboQuant-MoE support."""
 
 from __future__ import annotations
 
@@ -35,430 +13,224 @@ import aiohttp.web
 import psutil
 import structlog
 
-from turboquant.core.turboquant import TurboQuantConfig, TurboQuantKVCache
+from turboquant.core.turboquant_moe import TurboQuantMoE, TurboQuantMoEConfig
 
-log = structlog.get_logger(__name__)
-
-
-# ======================================================================
-# Memory monitor
-# ======================================================================
+LOGGER = structlog.get_logger(__name__)
 
 
 class OllamaMemoryMonitor:
-    """Background monitor that periodically reports Ollama process memory usage.
+    """Tracks process and optional GPU memory usage for savings reporting."""
 
-    Attributes:
-        interval_seconds: Polling interval.
-        current_mb: Latest RSS in megabytes.
-        peak_mb: Peak RSS observed since start.
-        tq_savings_mb: Estimated savings from TurboQuant compression.
-    """
-
-    def __init__(
-        self,
-        interval_seconds: float = 5.0,
-        tq_config: TurboQuantConfig | None = None,
-    ) -> None:
-        """Initialise OllamaMemoryMonitor.
-
-        Args:
-            interval_seconds: How often to poll (default 5 s).
-            tq_config: TurboQuant config for estimating savings.
-        """
-        self.interval_seconds = interval_seconds
-        self.tq_config = tq_config
-
-        self.current_mb: float = 0.0
-        self.peak_mb: float = 0.0
-        self.tq_savings_mb: float = 0.0
-        self.savings_percent: float = 0.0
-
+    def __init__(self) -> None:
+        self.current_mb = 0.0
+        self.peak_mb = 0.0
+        self.tq_savings_mb = 0.0
+        self.savings_percent = 0.0
         self._task: asyncio.Task[None] | None = None
         self._running = False
 
     async def start(self) -> None:
-        """Launch the background polling task."""
         self._running = True
-        self._task = asyncio.create_task(self._poll_loop())
-        log.info("OllamaMemoryMonitor.start", interval=self.interval_seconds)
+        self._task = asyncio.create_task(self._loop())
 
     async def stop(self) -> None:
-        """Cancel the background polling task."""
         self._running = False
         if self._task is not None:
             self._task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._task
-        log.info("OllamaMemoryMonitor.stop")
 
-    async def _poll_loop(self) -> None:
-        """Internal polling coroutine."""
+    async def _loop(self) -> None:
         while self._running:
-            try:
-                self._sample()
-            except Exception as exc:  # noqa: BLE001
-                log.warning("memory_monitor_error", error=str(exc))
-            await asyncio.sleep(self.interval_seconds)
+            self._sample()
+            await asyncio.sleep(5)
 
     def _sample(self) -> None:
-        """Take a single memory reading."""
-        ollama_rss = 0.0
+        rss_mb = 0.0
         for proc in psutil.process_iter(["name", "cmdline"]):
             try:
                 name = (proc.info.get("name") or "").lower()
                 cmdline = " ".join(proc.info.get("cmdline") or []).lower()
                 if "ollama" in name or "ollama" in cmdline:
-                    mem = proc.memory_info()
-                    ollama_rss += mem.rss / (1024 * 1024)
+                    rss_mb += proc.memory_info().rss / (1024**2)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
 
-        self.current_mb = ollama_rss
-        self.peak_mb = max(self.peak_mb, ollama_rss)
-
-        # Estimate savings
-        if self.tq_config is not None and ollama_rss > 0:
-            bits_total = self.tq_config.bits + (1 if self.tq_config.residual_correction else 0)
-            compression_ratio = 16.0 / bits_total  # FP16 → bits_total
-            # KV-cache is ~30-50% of total inference memory; estimate 40%
-            kv_fraction = 0.40
-            potential_kv_saving = ollama_rss * kv_fraction * (1 - 1 / compression_ratio)
-            self.tq_savings_mb = potential_kv_saving
-            self.savings_percent = (potential_kv_saving / max(ollama_rss, 1e-9)) * 100
-        else:
-            self.tq_savings_mb = 0.0
-            self.savings_percent = 0.0
+        self.current_mb = rss_mb
+        self.peak_mb = max(self.peak_mb, rss_mb)
 
     def report(self) -> dict[str, float]:
-        """Return a snapshot of current memory statistics.
-
-        Returns:
-            Dict with keys: ``current_mb``, ``peak_mb``,
-            ``tq_savings_mb``, ``savings_percent``.
-        """
         return {
-            "current_mb": round(self.current_mb, 2),
-            "peak_mb": round(self.peak_mb, 2),
-            "tq_savings_mb": round(self.tq_savings_mb, 2),
-            "savings_percent": round(self.savings_percent, 1),
+            "current_mb": self.current_mb,
+            "peak_mb": self.peak_mb,
+            "tq_savings_mb": self.tq_savings_mb,
+            "savings_percent": self.savings_percent,
         }
 
 
-# ======================================================================
-# Proxy server
-# ======================================================================
-
-
 class OllamaTurboQuantProxy:
-    """HTTP reverse-proxy between clients and Ollama with TurboQuant integration.
-
-    Transparently forwards all Ollama API requests while exposing additional
-    ``/tq/*`` endpoints for status, metrics, and config hot-reload.
-
-    Attributes:
-        ollama_host: Upstream Ollama base URL (e.g. ``http://localhost:11434``).
-        proxy_port: Port for this proxy server.
-        tq_config: Active TurboQuant configuration.
-    """
+    """Reverse proxy for Ollama endpoints enriched with TurboQuant endpoints."""
 
     def __init__(
         self,
-        ollama_host: str = "http://localhost:11434",
-        proxy_port: int = 11435,
-        tq_config: TurboQuantConfig | None = None,
+        ollama_host: str,
+        proxy_port: int,
+        tq_moe_config: TurboQuantMoEConfig,
     ) -> None:
-        """Initialise OllamaTurboQuantProxy.
-
-        Args:
-            ollama_host: Ollama upstream base URL.
-            proxy_port: HTTP port for this proxy.
-            tq_config: Optional TurboQuant configuration. Uses defaults
-                when *None*.
-        """
         self.ollama_host = ollama_host.rstrip("/")
         self.proxy_port = proxy_port
-        self.tq_config = tq_config or TurboQuantConfig()
-        self.tq = TurboQuantKVCache(self.tq_config)
-        self.monitor = OllamaMemoryMonitor(
-            interval_seconds=5.0,
-            tq_config=self.tq_config,
-        )
+        self.tq_moe_config = tq_moe_config
+        self.tq_manager = TurboQuantMoE(tq_moe_config)
+        self.monitor = OllamaMemoryMonitor()
 
         self._app: aiohttp.web.Application | None = None
         self._runner: aiohttp.web.AppRunner | None = None
         self._site: aiohttp.web.TCPSite | None = None
         self._session: aiohttp.ClientSession | None = None
 
-        # Metrics counters
-        self._requests_total = 0
-        self._requests_errors = 0
-        self._start_time = 0.0
-
-        log.info(
-            "OllamaTurboQuantProxy.__init__",
-            ollama_host=self.ollama_host,
-            proxy_port=self.proxy_port,
-        )
-
-    # ---- lifecycle ----
-
     async def start(self) -> None:
-        """Start the proxy server and memory monitor."""
-        self._start_time = time.time()
-        self._session = aiohttp.ClientSession()
-
         self._app = aiohttp.web.Application()
-        self._app.router.add_route("GET", "/tq/status", self._handle_tq_status)
-        self._app.router.add_route("GET", "/tq/metrics", self._handle_tq_metrics)
-        self._app.router.add_route("POST", "/tq/config", self._handle_tq_config)
-        # Catch-all proxy for Ollama endpoints
-        self._app.router.add_route("*", "/{path:.*}", self._handle_proxy)
+        self._app.router.add_get("/tq/status", self._tq_status)
+        self._app.router.add_get("/tq/metrics", self._tq_metrics)
+        self._app.router.add_post("/tq/config", self._tq_config)
+        self._app.router.add_get("/tq/experts", self._tq_experts)
+        self._app.router.add_post("/tq/warmup", self._tq_warmup)
+        self._app.router.add_get("/health", self._health)
+
+        for path in ["/api/generate", "/api/chat", "/api/pull", "/api/show", "/api/ps"]:
+            self._app.router.add_route("*", path, self._proxy)
 
         self._runner = aiohttp.web.AppRunner(self._app)
         await self._runner.setup()
-        self._site = aiohttp.web.TCPSite(self._runner, "0.0.0.0", self.proxy_port)
+        self._site = aiohttp.web.TCPSite(self._runner, host="0.0.0.0", port=self.proxy_port)
         await self._site.start()
 
+        self._session = aiohttp.ClientSession()
         await self.monitor.start()
-
-        log.info("proxy_started", port=self.proxy_port)
+        LOGGER.info("proxy_started", port=self.proxy_port, host=self.ollama_host)
 
     async def stop(self) -> None:
-        """Gracefully shut down the proxy."""
         await self.monitor.stop()
+        if self._session is not None:
+            await self._session.close()
         if self._site is not None:
             await self._site.stop()
         if self._runner is not None:
             await self._runner.cleanup()
-        if self._session is not None:
-            await self._session.close()
-        log.info("proxy_stopped")
 
-    # ---- Ollama proxy handler ----
-
-    async def _handle_proxy(self, request: aiohttp.web.Request) -> aiohttp.web.StreamResponse:
-        """Forward any request to the upstream Ollama server.
-
-        Supports streaming responses (``Transfer-Encoding: chunked``).
-        Implements reconnect logic on connection failures.
-        """
-        self._requests_total += 1
-        target_url = f"{self.ollama_host}/{request.match_info['path']}"
-        if request.query_string:
-            target_url += f"?{request.query_string}"
-
+    async def _proxy(self, request: aiohttp.web.Request) -> aiohttp.web.StreamResponse:
+        assert self._session is not None
+        url = f"{self.ollama_host}{request.path_qs}"
         headers = dict(request.headers)
         headers.pop("Host", None)
-
         body = await request.read()
-        max_retries = 3
-        last_exc: Exception | None = None
 
-        for attempt in range(max_retries):
+        delay = 0.25
+        for attempt in range(5):
             try:
-                assert self._session is not None
                 async with self._session.request(
                     method=request.method,
-                    url=target_url,
+                    url=url,
                     headers=headers,
                     data=body,
-                    timeout=aiohttp.ClientTimeout(total=600),
-                ) as resp:
-                    # Check if streaming
-                    is_streaming = (
-                        resp.headers.get("Transfer-Encoding", "").lower() == "chunked"
-                        or "text/event-stream" in resp.headers.get("Content-Type", "")
+                ) as upstream:
+                    response = aiohttp.web.StreamResponse(
+                        status=upstream.status,
+                        headers=upstream.headers,
                     )
+                    await response.prepare(request)
+                    async for chunk in upstream.content.iter_chunked(8192):
+                        await response.write(chunk)
+                    await response.write_eof()
+                    return response
+            except aiohttp.ClientError:
+                if attempt == 4:
+                    raise
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 4.0)
+        raise RuntimeError("unreachable")
 
-                    if is_streaming:
-                        response = aiohttp.web.StreamResponse(
-                            status=resp.status,
-                            headers={
-                                k: v
-                                for k, v in resp.headers.items()
-                                if k.lower()
-                                not in ("transfer-encoding", "content-length", "connection")
-                            },
-                        )
-                        await response.prepare(request)
-                        async for chunk in resp.content.iter_any():
-                            await response.write(chunk)
-                        await response.write_eof()
-                        return response
-                    else:
-                        resp_body = await resp.read()
-                        return aiohttp.web.Response(
-                            status=resp.status,
-                            headers={
-                                k: v
-                                for k, v in resp.headers.items()
-                                if k.lower()
-                                not in ("transfer-encoding", "content-length", "connection")
-                            },
-                            body=resp_body,
-                        )
-            except (TimeoutError, aiohttp.ClientError) as exc:
-                last_exc = exc
-                self._requests_errors += 1
-                wait = 2**attempt
-                log.warning(
-                    "proxy_retry",
-                    attempt=attempt + 1,
-                    max_retries=max_retries,
-                    wait_s=wait,
-                    error=str(exc),
-                )
-                await asyncio.sleep(wait)
-
-        log.error("proxy_failed", url=target_url, error=str(last_exc))
-        return aiohttp.web.json_response(
-            {"error": f"Failed to reach Ollama after {max_retries} attempts: {last_exc}"},
-            status=502,
-        )
-
-    # ---- TurboQuant control endpoints ----
-
-    async def _handle_tq_status(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
-        """GET /tq/status — proxy status and memory savings."""
-        uptime = time.time() - self._start_time
-        mem = self.monitor.report()
+    async def _tq_status(self, _request: aiohttp.web.Request) -> aiohttp.web.Response:
+        rep = self.tq_manager.memory_report()
         payload = {
-            "status": "running",
-            "uptime_seconds": round(uptime, 1),
-            "requests_total": self._requests_total,
-            "requests_errors": self._requests_errors,
             "config": {
-                "ollama_host": self.ollama_host,
-                "proxy_port": self.proxy_port,
-                "tq_bits": self.tq_config.bits,
-                "tq_group_size": self.tq_config.group_size,
-                "tq_residual": self.tq_config.residual_correction,
-                "tq_max_seq_len": self.tq_config.max_seq_len,
+                "model_type": self.tq_moe_config.model_type,
+                "bits": self.tq_moe_config.kv_config.bits,
+                "gpu_cache_experts": self.tq_moe_config.expert_config.gpu_cache_size,
             },
-            "memory": mem,
+            "memory": rep.__dict__,
+            "monitor": self.monitor.report(),
         }
         return aiohttp.web.json_response(payload)
 
-    async def _handle_tq_metrics(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
-        """GET /tq/metrics — Prometheus-compatible metrics."""
-        mem = self.monitor.report()
-        uptime = time.time() - self._start_time
-        lines = [
-            "# HELP turboquant_proxy_uptime_seconds Proxy uptime in seconds",
-            "# TYPE turboquant_proxy_uptime_seconds gauge",
-            f"turboquant_proxy_uptime_seconds {uptime:.1f}",
-            "",
-            "# HELP turboquant_proxy_requests_total Total proxied requests",
-            "# TYPE turboquant_proxy_requests_total counter",
-            f"turboquant_proxy_requests_total {self._requests_total}",
-            "",
-            "# HELP turboquant_proxy_requests_errors_total Failed proxy requests",
-            "# TYPE turboquant_proxy_requests_errors_total counter",
-            f"turboquant_proxy_requests_errors_total {self._requests_errors}",
-            "",
-            "# HELP turboquant_ollama_memory_mb Ollama RSS in MB",
-            "# TYPE turboquant_ollama_memory_mb gauge",
-            f"turboquant_ollama_memory_mb {mem['current_mb']}",
-            "",
-            "# HELP turboquant_ollama_memory_peak_mb Peak Ollama RSS in MB",
-            "# TYPE turboquant_ollama_memory_peak_mb gauge",
-            f"turboquant_ollama_memory_peak_mb {mem['peak_mb']}",
-            "",
-            "# HELP turboquant_savings_mb Estimated TQ savings in MB",
-            "# TYPE turboquant_savings_mb gauge",
-            f"turboquant_savings_mb {mem['tq_savings_mb']}",
-            "",
-            "# HELP turboquant_savings_percent Estimated TQ savings percent",
-            "# TYPE turboquant_savings_percent gauge",
-            f"turboquant_savings_percent {mem['savings_percent']}",
-            "",
-        ]
-        return aiohttp.web.Response(
-            text="\n".join(lines),
-            content_type="text/plain; version=0.0.4",
+    async def _tq_metrics(self, _request: aiohttp.web.Request) -> aiohttp.web.Response:
+        rep = self.tq_manager.memory_report()
+        text = "\n".join(
+            [
+                f"turboquant_total_saved_mb {rep.total_saved_mb}",
+                f"turboquant_expert_hit_rate {rep.expert_hit_rate}",
+                f"turboquant_prefetch_accuracy {rep.prefetch_accuracy}",
+                "",
+            ]
         )
+        return aiohttp.web.Response(text=text, content_type="text/plain")
 
-    async def _handle_tq_config(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
-        """POST /tq/config — hot-reload TurboQuant configuration.
+    async def _tq_config(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
+        payload = await request.json()
+        if "enable_expert_prediction" in payload:
+            self.tq_moe_config.enable_expert_prediction = bool(payload["enable_expert_prediction"])
+        return aiohttp.web.json_response({"ok": True, "updated": payload})
 
-        Expects JSON body with any subset of TurboQuantConfig fields.
-        """
-        try:
-            data = await request.json()
-        except Exception:
-            return aiohttp.web.json_response({"error": "invalid JSON"}, status=400)
+    async def _tq_experts(self, _request: aiohttp.web.Request) -> aiohttp.web.Response:
+        stats = self.tq_manager.expert_cache.stats()
+        return aiohttp.web.json_response(stats.__dict__)
 
-        allowed = {"bits", "group_size", "residual_correction", "sketch_dim", "max_seq_len"}
-        updated = {}
-        for key in allowed:
-            if key in data:
-                setattr(self.tq_config, key, data[key])
-                updated[key] = data[key]
+    async def _tq_warmup(self, request: aiohttp.web.Request) -> aiohttp.web.Response:
+        payload = await request.json()
+        history = payload.get("routing_history", [])
+        self.tq_manager.expert_cache.warmup(history)
+        return aiohttp.web.json_response({"ok": True})
 
-        if updated:
-            # Rebuild TurboQuant engine
-            self.tq = TurboQuantKVCache(self.tq_config)
-            self.monitor.tq_config = self.tq_config
-            log.info("tq_config_reloaded", **updated)
-
-        return aiohttp.web.json_response({"updated": updated, "status": "ok"})
+    async def _health(self, _request: aiohttp.web.Request) -> aiohttp.web.Response:
+        return aiohttp.web.json_response({"status": "ok", "ts": time.time()})
 
 
-# ======================================================================
-# CLI entry point
-# ======================================================================
+def load_proxy_from_env() -> OllamaTurboQuantProxy:
+    """Build proxy instance from environment variables."""
+    host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+    port = int(os.getenv("PROXY_PORT", "11435"))
+    bits = int(os.getenv("TQ_BITS", "3"))
+    gpu_cache = int(os.getenv("TQ_GPU_CACHE_EXPERTS", "4"))
 
-
-def _config_from_env() -> tuple[str, int, TurboQuantConfig]:
-    """Build configuration from environment variables."""
-    ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-    proxy_port = int(os.environ.get("PROXY_PORT", "11435"))
-    config = TurboQuantConfig(
-        bits=int(os.environ.get("TQ_BITS", "3")),
-        group_size=int(os.environ.get("TQ_GROUP_SIZE", "64")),
-        residual_correction=os.environ.get("TQ_RESIDUAL", "true").lower() in ("true", "1", "yes"),
-        max_seq_len=int(os.environ.get("TQ_MAX_SEQ_LEN", "32768")),
+    cfg = TurboQuantMoEConfig.from_pretrained_config(
+        type("Cfg", (), {"hidden_size": 4096, "num_attention_heads": 32, "model_type": "mixtral"})(),
+        bits=bits,
+        gpu_cache_size=gpu_cache,
     )
-    return ollama_host, proxy_port, config
+    return OllamaTurboQuantProxy(host, port, cfg)
 
 
-async def _run() -> None:
-    """Async entry point."""
-    ollama_host, proxy_port, config = _config_from_env()
-    proxy = OllamaTurboQuantProxy(
-        ollama_host=ollama_host,
-        proxy_port=proxy_port,
-        tq_config=config,
-    )
+async def run_proxy_from_env() -> None:
+    """Entrypoint to run proxy with SIGTERM/SIGINT graceful shutdown."""
+    proxy = load_proxy_from_env()
+    await proxy.start()
 
-    loop = asyncio.get_event_loop()
     stop_event = asyncio.Event()
 
-    def _sig_handler() -> None:
-        log.info("shutdown_signal_received")
+    def _stop() -> None:
         stop_event.set()
 
+    loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _sig_handler)
-
-    await proxy.start()
-    log.info("proxy_ready", port=proxy_port, ollama=ollama_host)
+        with suppress(RuntimeError):
+            loop.add_signal_handler(sig, _stop)
 
     await stop_event.wait()
     await proxy.stop()
 
 
 def main() -> None:
-    """Synchronous CLI entry point."""
-    structlog.configure(
-        processors=[
-            structlog.processors.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.JSONRenderer(),
-        ],
-    )
-    asyncio.run(_run())
+    asyncio.run(run_proxy_from_env())
 
 
 if __name__ == "__main__":
