@@ -2,12 +2,32 @@
 
 [![PyPI](https://img.shields.io/pypi/v/turboquant-moe.svg)](https://pypi.org/project/turboquant-moe/) [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/) [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE) [![CI](https://img.shields.io/github/actions/workflow/status/RemizovDenis/turboquant/ci.yml)](https://github.com/RemizovDenis/turboquant/actions) [![arXiv](https://img.shields.io/badge/arXiv-2504.19874-b31b1b.svg)](https://arxiv.org/abs/2504.19874) [![Discord](https://img.shields.io/badge/discord-community-5865F2.svg)](https://discord.gg/)
 
-> Production-ready implementation of Google DeepMind's TurboQuant algorithm with dynamic expert caching for Mixture-of-Experts models.
-> Run Mixtral-style workloads with significantly lower memory overhead while preserving model behavior.
+> Production implementation of Google DeepMind's TurboQuant algorithm with dynamic MoE expert caching.
+> Includes extension foundation for game-theoretic routing, speculative prefetch, dynamic VRAM control, semantic KV eviction, cross-layer sharing, and adaptive bitwidth quantization.
 
 ## Why TurboQuant-MoE?
 
 Long-context inference and MoE serving are memory-bound: KV cache grows with sequence length, and MoE layers keep many expert weights resident even when only top-k experts are active each step. TurboQuant-MoE combines true packed 3-bit KV compression, residual correction, CPU expert offloading, and prefetching. In the full benchmark run on March 28, 2026 (`results/benchmark_20260328_034636.json`, CPU fallback), the project reached 4.1x KV compression (24.22% of FP16 KV memory), recall@1 = 1.0 on tested quality slices (1k/4k/16k), and 2.625 GB equivalent GPU memory savings from expert caching.
+
+## Extension Foundation (Patch v0.1.1)
+
+This branch also includes the extension foundation integrated into the pipeline:
+
+- `GameTheoreticRouter` (Nash-style routing with capacity-aware selection)
+- `MarkovTrajectoryPredictor` (speculative expert prefetch)
+- `VRAM_PID_Controller` (dynamic GPU cache sizing)
+- `SemanticKVEviction` (importance-based KV token retention)
+- `CrossLayerKVCache` (anchor + delta KV sharing)
+- `AdaptiveBitwidthQuantizer` (per-token dynamic bitwidth)
+
+Latest local synthetic CPU snapshot (`results/benchmark_20260328_051700.json`):
+
+- predictor rolling accuracy: `1.00`
+- predictor mean latency: `0.097 ms`
+- markov accuracy@k: `0.828`
+- markov hidden IO ratio: `44.48%`
+
+These extensions are actively tuned toward the production targets (higher expert-cache hit rate, higher hidden IO ratio, and GPU-side throughput gains on long contexts).
 
 ## Benchmarks
 
