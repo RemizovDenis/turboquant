@@ -206,7 +206,8 @@ class BenchmarkRunner:
             num_experts=8,
             top_k_experts=2,
             num_layers=4,
-            gpu_cache_size=4,
+            gpu_cache_size=12,
+            eviction_policy="arc",
             device=self.ctx.device,
         )
         cache = DynamicExpertCache(cfg)
@@ -216,8 +217,8 @@ class BenchmarkRunner:
                 num_experts=cfg.num_experts,
                 top_k_experts=cfg.top_k_experts,
                 lookahead_steps=2,
-                min_prefetch_prob=0.05,
-                prefetch_threshold=0.2,
+                min_prefetch_prob=0.1,
+                prefetch_threshold=0.15,
                 max_pending_prefetches=64,
                 device=self.ctx.device,
             ),
@@ -232,6 +233,15 @@ class BenchmarkRunner:
         for layer in range(cfg.num_layers):
             for expert in range(cfg.num_experts):
                 cache.register_expert(expert, layer, weights)
+
+        warmup_history: list[list[list[int]]] = []
+        for layer in range(cfg.num_layers):
+            layer_steps: list[list[int]] = []
+            for step in range(16):
+                base = (step * 3 + layer) % cfg.num_experts
+                layer_steps.append([base, (base + 1) % cfg.num_experts])
+            warmup_history.append(layer_steps)
+        cache.warmup(warmup_history)
 
         latencies = []
         for step in tqdm(range(50), desc="moe_expert"):
@@ -250,6 +260,9 @@ class BenchmarkRunner:
 
         stats = cache.stats()
         markov_stats = markov.stats()
+        hidden_io_percent = (
+            100.0 * markov_stats.io_latency_hidden_ms / max(1e-8, float(np.sum(latencies)))
+        )
         return {
             "hit_rate": stats.hit_rate,
             "avg_expert_load_latency_ms": float(np.mean(latencies)),
@@ -258,6 +271,7 @@ class BenchmarkRunner:
             "markov_accuracy_at_k": markov_stats.accuracy_at_k,
             "markov_accuracy_at_1": markov_stats.accuracy_at_1,
             "markov_io_hidden_ms": markov_stats.io_latency_hidden_ms,
+            "markov_hidden_io_percent": hidden_io_percent,
         }
 
     def moe_router_benchmark(self) -> dict[str, Any]:

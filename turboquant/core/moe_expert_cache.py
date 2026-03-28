@@ -40,9 +40,9 @@ class ExpertCacheConfig:
     num_layers: int
     gpu_cache_size: int
     compress_cpu_experts: bool = True
-    prefetch_depth: int = 2
+    prefetch_depth: int = 3
     prefetch_threshold: float = 0.5
-    eviction_policy: str = "lru"
+    eviction_policy: str = "arc"
     pin_memory: bool = True
     transfer_streams: int = 2
     device: str = "cuda"

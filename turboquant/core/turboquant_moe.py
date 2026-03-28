@@ -123,6 +123,9 @@ class TurboQuantMoEConfig:
             num_layers=num_layers,
             num_experts=num_experts,
             top_k_experts=top_k,
+            prefetch_threshold=0.25,
+            min_prefetch_prob=0.1,
+            max_pending_prefetches=max(32, num_layers * top_k),
             device="cuda" if torch.cuda.is_available() else "cpu",
         )
         pid_cfg = PIDConfig(

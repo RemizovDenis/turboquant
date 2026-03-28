@@ -37,8 +37,8 @@ class MarkovPrefetchConfig:
     top_k_experts: int
     lookahead_steps: int = 3
     ema_alpha: float = 0.05
-    prefetch_threshold: float = 0.35
-    min_prefetch_prob: float = 0.15
+    prefetch_threshold: float = 0.25
+    min_prefetch_prob: float = 0.1
     prefetch_priority_decay: float = 0.7
     async_transfer_streams: int = 2
     max_pending_prefetches: int = 16
