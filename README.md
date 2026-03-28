@@ -1,299 +1,213 @@
-# TurboQuant
+# TurboQuant-MoE
 
-[![PyPI](https://img.shields.io/pypi/v/turboquant)](https://pypi.org/project/turboquant/)
-[![Python](https://img.shields.io/pypi/pyversions/turboquant)](https://pypi.org/project/turboquant/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![CI](https://github.com/RemizovDenis/turboquant/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/RemizovDenis/turboquant/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/turboquant-moe.svg)](https://pypi.org/project/turboquant-moe/) [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/) [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE) [![CI](https://img.shields.io/github/actions/workflow/status/RemizovDenis/turboquant/ci.yml)](https://github.com/RemizovDenis/turboquant/actions) [![arXiv](https://img.shields.io/badge/arXiv-2504.19874-b31b1b.svg)](https://arxiv.org/abs/2504.19874) [![Discord](https://img.shields.io/badge/discord-community-5865F2.svg)](https://discord.gg/)
 
-**Production-ready implementation of Google's TurboQuant algorithm: 4× memory reduction for LLM KV-cache with zero recall degradation.**
+> Production implementation of Google DeepMind's TurboQuant algorithm with dynamic MoE expert caching.
+> Includes extension foundation for game-theoretic routing, speculative prefetch, dynamic VRAM control, semantic KV eviction, cross-layer sharing, and adaptive bitwidth quantization.
 
-Based on [arXiv 2504.19874](https://arxiv.org/abs/2504.19874). First open-source library with enterprise-grade quality.
+## Why TurboQuant-MoE?
 
----
+Long-context inference and MoE serving are memory-bound: KV cache grows with sequence length, and MoE layers keep many expert weights resident even when only top-k experts are active each step. TurboQuant-MoE combines true packed 3-bit KV compression, residual correction, CPU expert offloading, and prefetching. In the full benchmark run on March 28, 2026 (`results/benchmark_20260328_034636.json`, CPU fallback), the project reached 4.1x KV compression (24.22% of FP16 KV memory), recall@1 = 1.0 on tested quality slices (1k/4k/16k), and 2.625 GB equivalent GPU memory savings from expert caching.
+
+## Extension Foundation (Patch v0.1.1)
+
+This branch also includes the extension foundation integrated into the pipeline:
+
+- `GameTheoreticRouter` (Nash-style routing with capacity-aware selection)
+- `MarkovTrajectoryPredictor` (speculative expert prefetch)
+- `VRAM_PID_Controller` (dynamic GPU cache sizing)
+- `SemanticKVEviction` (importance-based KV token retention)
+- `CrossLayerKVCache` (anchor + delta KV sharing)
+- `AdaptiveBitwidthQuantizer` (per-token dynamic bitwidth)
+
+Latest local synthetic CPU snapshot (`results/benchmark_20260328_051700.json`):
+
+- predictor rolling accuracy: `1.00`
+- predictor mean latency: `0.097 ms`
+- markov accuracy@k: `0.828`
+- markov hidden IO ratio: `44.48%`
+
+These extensions are actively tuned toward the production targets (higher expert-cache hit rate, higher hidden IO ratio, and GPU-side throughput gains on long contexts).
 
 ## Benchmarks
 
-| Method | KV-cache Memory | Recall@104k | Latency Overhead |
-|---|---|---|---|
-| FP16 baseline | 100% | 100% | 1.00× |
-| KIVI 2-bit | 12.5% | 94.2%¹ | 0.98× |
-| **TurboQuant 3-bit** | **18.75%** | **100%¹** | **~0.97×** |
-| TurboQuant 3+1 bit | 25% | 100%¹ | ~0.95× |
+Numbers below come from local benchmark outputs in `results/benchmark_20260328_034636.json` and `results/README_benchmark.md`.
 
-> ¹ Recall numbers from [arXiv 2504.19874](https://arxiv.org/abs/2504.19874) (Google Research). Memory ratios are mathematically exact (3/16 and 4/16). Latency is estimated. Run `turboquant-benchmark` for numbers on your hardware.
+### Memory (Mixtral-8x7B harness, seq_len up to 16k, CPU fallback)
 
-### Memory savings by sequence length
+| Method | GPU RAM (MB) | CPU RAM (MB) | Recall@64k | Tokens/sec |
+|---|---:|---:|---:|---:|
+| FP16 baseline (seq_len=16384) | 256.0 | 0.0 | n/a | n/a |
+| KIVI 2bit (reference class) | n/a | n/a | n/a | n/a |
+| TurboQuant KV-only (3bit) | 62.0 | 0.0 | 1.00 (tested up to 16k) | 2044.11 |
+| TurboQuant-MoE (KV + expert cache) | 62.0 + expert offload | CPU expert tier | 1.00 (tested up to 16k) | 2044.11 |
 
-Measured on CPU (Python 3.13, 8 heads × 128 dim, int8 container + float32 scales):
+Measured KV memory points (local run):
 
-| Seq Length | FP16 (MB) | TurboQuant (MB) | Saved | Savings |
-|---|---|---|---|---|
-| 256 | ~0.5 | ~0.3 | ~0 | 45% |
-| 1,024 | ~4 | ~2 | 2 MB | 45% |
-| 4,096 | ~16 | ~9 | 7 MB | 45% |
-| 8,192 | ~32 | ~18 | 14 MB | 45% |
+| Seq Len | FP16 MB | TurboQuant 3bit MB | Ratio |
+|---:|---:|---:|---:|
+| 1024 | 16.0 | 3.875 | 0.2422 |
+| 4096 | 64.0 | 15.5 | 0.2422 |
+| 16384 | 256.0 | 62.0 | 0.2422 |
 
-> **Note:** True 3-bit packing (3 bits per element rather than int8) would achieve **75% savings**. int8 storage is a deliberate trade-off for hardware compatibility and speed. Custom CUDA kernels for bit-packing are on the [roadmap](#contributing).
->
-> At Llama-3-8B scale (32 heads, 128k context), FP16 KV-cache is ~4 GB → TurboQuant reduces it to ~2.2 GB.
+### Expert Cache Performance
 
----
+| gpu_cache_size | Hit Rate | Avg Load (ms) | GPU Saved (GB) |
+|---:|---:|---:|---:|
+| 4 | 0.10 | 152.75 | 2.625 |
+
+Source: `results/benchmark_20260328_034636.json` (`moe_expert` suite).
+
+### Inference Speed
+
+| Seq Len | Prefill Latency (ms) | Decode Latency (ms) | Throughput (tokens/sec) |
+|---:|---:|---:|---:|
+| 1024 | 186.41 | 111.83 | 5493.33 |
+| 4096 | 831.67 | 483.93 | 4925.03 |
+| 16384 | 8015.24 | 4255.05 | 2044.11 |
+
+Predictor metrics from the same run: rolling accuracy `0.04`, mean latency `0.266 ms`, p99 latency `0.434 ms`, memory overhead `1.055 MB`.
 
 ## Quick Start
 
-```python
-from transformers import AutoModelForCausalLM
-from turboquant import TurboQuantConfig
-from turboquant.integrations.transformers import patch_model
-
-model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3-8B", torch_dtype="float16")
-config = TurboQuantConfig(head_dim=128, num_heads=32)
-model = patch_model(model, config)
-# Done. The model now uses ~45% less KV-cache memory (75% with packed 3-bit).
+```bash
+pip install turboquant-moe[transformers]
 ```
 
-Three lines. No model retraining. No architecture changes.
+```python
+from transformers import AutoModelForCausalLM
+from turboquant.integrations.transformers import patch_moe_model, auto_config
 
----
+model = AutoModelForCausalLM.from_pretrained(
+    "mistralai/Mixtral-8x7B-v0.1",
+    torch_dtype="auto",
+    device_map="auto",
+)
+model = patch_moe_model(model, auto_config(model))
+```
 
 ## Installation
 
 ```bash
-# Core (PyTorch + quantization engine)
-pip install turboquant
-
-# With HuggingFace Transformers support
-pip install turboquant[transformers]
-
-# With Ollama proxy
-pip install turboquant[ollama]
-
-# With vector database adapters
-pip install turboquant[chroma]
-pip install turboquant[qdrant]
-
-# Everything
-pip install turboquant[all]
+pip install turboquant-moe                          # core
+pip install turboquant-moe[transformers]            # HuggingFace
+pip install turboquant-moe[vllm]                    # vLLM production
+pip install turboquant-moe[benchmark]               # benchmarks
+pip install turboquant-moe[all]                     # everything
 ```
 
-Requirements: Python ≥ 3.11, PyTorch ≥ 2.2.0.
+## Usage
 
----
+### With HuggingFace Transformers
 
-## Usage with Ollama (VPS Deployment)
+```python
+from turboquant.integrations.transformers import auto_config, patch_moe_model
 
-For running LLMs on your own server with reduced memory:
+cfg = auto_config(model, bits=3, gpu_cache_experts=4)
+model = patch_moe_model(model, cfg)
+```
+
+### With vLLM (production servers)
+
+```python
+from turboquant.integrations.vllm import create_turboquant_llm
+from turboquant.core.turboquant_moe import TurboQuantMoEConfig
+
+cfg = TurboQuantMoEConfig.from_pretrained_config(type("C", (), {
+    "hidden_size": 4096,
+    "num_attention_heads": 32,
+    "model_type": "mixtral",
+})())
+
+llm = create_turboquant_llm(
+    model="mistralai/Mixtral-8x7B-v0.1",
+    tq_moe_config=cfg,
+    max_model_len=32768,
+)
+```
+
+### With Ollama (VPS / local)
 
 ```bash
-# Clone and deploy
-git clone https://github.com/remizovdenis/turboquant.git
-cd turboquant
-cp .env.example .env
 docker compose up -d
 ```
 
-That's it. Your Ollama instance now runs behind the TurboQuant proxy at port `11435`. All existing API calls work unchanged.
+Proxy endpoints:
+- `GET /tq/status`
+- `GET /tq/metrics`
+- `GET /tq/experts`
+- `POST /tq/warmup`
+- `GET /health`
 
-```bash
-# Use as before, just point to the proxy port
-curl http://localhost:11435/api/generate -d '{"model": "llama3", "prompt": "Hello"}'
+### Expert Cache Tuning
 
-# Check savings
-curl http://localhost:11435/tq/status
-```
+- `gpu_cache_size`: start with `top_k * 2` to keep active + next-step candidates.
+- `prefetch_depth`: `1-2` for low-latency online serving; increase for stable repetitive traffic.
+- `prefetch_threshold`: raise if GPU churn is high; lower if miss spikes dominate latency.
 
-**Result:** ~60–75% RAM savings on KV-cache for long-context inference.
+## How It Works
 
----
+KV-cache quantization applies an orthogonal transform before quantization to distribute error more evenly across dimensions, then packs values into compact representation with optional residual correction.
+
+Expert caching keeps active experts on GPU and stores inactive experts on CPU, optionally compressed. Eviction policy (ARC/LRU/LFU) decides what leaves GPU when cache is full.
+
+Expert prediction estimates which experts will be needed on upcoming steps and prefetches them in background. Correct predictions hide transfer latency behind compute.
+
+## Supported Models
+
+| Model | KV-Quant | Expert Cache | Expert Prediction | Status |
+|---|---|---|---|---|
+| Mixtral-8x7B | Yes | Yes | Yes | Implemented |
+| Mixtral-8x22B | Yes | Yes | Yes | Experimental |
+| DeepSeek-V2 | Yes | Yes | Yes | Experimental |
+| DeepSeek-V3 | Yes | Yes | Yes | Experimental |
+| Qwen1.5-MoE | Yes | Yes | Yes | Experimental |
+| OLMoE | Yes | Yes | Yes | Experimental |
+| Arctic | Yes | Yes | Yes | Experimental |
+| Llama-3 | Yes | No | No | KV-only |
 
 ## Architecture
 
-TurboQuant compresses KV-cache in two stages:
-
-### Stage 1: Polar Quantization (3 bits)
-- Apply a random orthogonal rotation **Π** to the KV tensors. This spreads information uniformly across dimensions, making quantization errors more predictable.
-- Fit a Beta distribution to the rotated data and compute an optimal Lloyd-Max codebook.
-- Quantize each element to 3 bits (8 levels) with per-group scaling (group size = 64).
-
-### Stage 2: Residual Correction (1 bit)
-- Compute the residual **R = X − X̂** between original and dequantized.
-- Project **R** using a Johnson-Lindenstrauss random sign matrix into a lower-dimensional space.
-- Store only the **sign** of each projection (1 bit per dimension).
-- Reconstruct an approximation of the residual via back-projection.
-
-**Total: 3 + 1 = 4 bits** per element. FP16 uses 16 bits. Compression ratio: **4×**.
-
-The rotation is what makes this work — without it, quantization errors are correlated and accumulate. With it, they become approximately independent and can be corrected more efficiently.
-
----
-
-## Compatibility
-
-### Supported Models
-
-| Model | Architecture | Status |
-|---|---|---|
-| Llama 3 (8B, 70B) | LlamaAttention | ✅ Supported |
-| Mistral 7B | MistralAttention | ✅ Supported |
-| Qwen 2 (7B, 72B) | Qwen2Attention | ✅ Supported |
-| Gemma 2 (9B, 27B) | Gemma2Attention | ✅ Supported |
-| Phi-3 (mini, medium) | Phi3Attention | ✅ Supported |
-
-> "Supported" = the attention module is patched correctly. We welcome community benchmarks on specific models — [open an issue](https://github.com/remizovdenis/turboquant/issues) with your results.
-
-### Supported Backends
-
-| Backend | Integration | Status |
-|---|---|---|
-| HuggingFace Transformers | `patch_model()` | ✅ Production |
-| Ollama | Docker proxy | ✅ Production |
-| ChromaDB | Vector adapter | ✅ Production |
-| Qdrant | Vector adapter | ✅ Production |
-| ONNX Runtime | `export_onnx()` | ✅ Export |
-
----
-
-## Vector Database Compression
-
-TurboQuant also compresses embedding vectors for vector databases:
-
-```python
-from turboquant import TurboQuantConfig
-from turboquant.integrations.vector_db import create_adapter
-
-config = TurboQuantConfig(head_dim=1536, device="cpu")
-adapter = create_adapter("memory", config)
-
-# Index 100k embeddings using 4x less storage
-adapter.compress_embeddings(embeddings, ids=doc_ids)
-
-# Search with on-the-fly decompression
-results = adapter.search(query_vector, top_k=10)
+```text
+Input tokens
+  -> Attention KV creation
+  -> TurboQuantKVCache.compress (3-bit + scales + optional residual)
+  -> MoE router logits
+  -> MoERouterOptimizer (prune, top-k, capacity)
+  -> ExpertPredictor (optional, async prefetch targets)
+  -> DynamicExpertCache (GPU hit / CPU load / evict)
+  -> Layer output
 ```
-
----
-
-## Benchmarking
-
-Run the full benchmark suite:
-
-```bash
-# All benchmarks
-turboquant-benchmark --suite all --output ./results
-
-# Memory only
-turboquant-benchmark --suite memory --head-dim 128 --num-heads 32
-
-# Generate HTML report with interactive charts
-turboquant-benchmark --suite all --output ./results
-# → results/benchmark_report.html
-```
-
----
-
-## API Reference
-
-### Core
-
-```python
-from turboquant import TurboQuantConfig, TurboQuantKVCache, CacheEntry
-
-# Configure
-config = TurboQuantConfig(
-    head_dim=128,
-    num_heads=32,
-    bits=3,               # 3-bit polar quantization
-    group_size=64,         # elements per scale group
-    residual_correction=True,  # +1 bit QJL correction
-    device="cuda",
-    max_seq_len=131072,
-)
-
-# Use as context manager for automatic GPU cleanup
-with TurboQuantKVCache(config) as tq:
-    entry = tq.compress(keys, values)       # → CacheEntry
-    keys, values = tq.decompress(entry)     # → (Tensor, Tensor)
-    entry = tq.update(entry, new_k, new_v)  # incremental append
-    print(tq.memory_usage(entry))           # → dict with bytes, MB, ratio
-    df = tq.benchmark([1024, 4096, 16384])  # → pandas DataFrame
-```
-
-### HuggingFace Integration
-
-```python
-from turboquant.integrations.transformers import patch_model, unpatch_model, turboquant_inference
-
-# Permanent patch
-model = patch_model(model, config)
-# ... use model normally ...
-model = unpatch_model(model)
-
-# Temporary patch via context manager
-with turboquant_inference(model, config) as tq_model:
-    outputs = tq_model.generate(input_ids, max_new_tokens=100)
-```
-
----
-
-## Quick Setup
-
-```bash
-git clone https://github.com/remizovdenis/turboquant.git
-cd turboquant
-./scripts/quickstart.sh
-```
-
-This creates a virtual environment, installs dependencies, runs tests, and produces your first benchmark.
-
----
 
 ## Contributing
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/improvement`)
-3. Install dev dependencies: `pip install -e ".[dev]"`
-4. Run tests: `pytest tests/ -v`
-5. Run linting: `ruff check turboquant/`
-6. Submit a pull request
-
-We especially welcome:
-- Benchmark results on specific models and hardware
-- Integration tests with real HuggingFace models
-- MLX / Apple Silicon optimisations
-- Additional vector DB backends
-
----
-
-## Contact
-
-- **GitHub Issues**: [remizovdenis/turboquant/issues](https://github.com/remizovdenis/turboquant/issues)
-- **Email**: cryptomillioner@icloud.com
-- **Telegram**: [@nofaith7](https://t.me/nofaith7)
-- **Website**: [securilayer.dev](https://securilayer.dev)
-- **Consulting & Integration**: For enterprise integration, dedicated support, or custom deployments — reach out via email or Telegram
-
----
+1. Fork and create a feature branch.
+2. Install dev dependencies: `pip install -e ".[dev]"`.
+3. Run checks: `ruff check turboquant/`, `mypy turboquant/ --strict`, `pytest tests/ -v`.
+4. Open PR with benchmark delta when performance-related.
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
-
----
+MIT. See [LICENSE](./LICENSE).
 
 ## Citation
 
 ```bibtex
-@article{turboquant2025,
-  title={TurboQuant: Online KV-Cache Quantization with Polar Decomposition},
-  author={Google Research},
-  journal={arXiv preprint arXiv:2504.19874},
-  year={2025}
+@software{turboquant_moe_2026,
+  author = {Remizov, Denis},
+  title = {TurboQuant-MoE: Production KV-Cache Quantization with Dynamic Expert Caching},
+  year = {2026},
+  url = {https://github.com/RemizovDenis/turboquant-moe},
 }
+```
 
-@software{turboquant_lib,
-  title={TurboQuant Python Library},
-  author={Denis Remizov},
-  url={https://github.com/remizovdenis/turboquant},
+Based on:
+
+```bibtex
+@article{turboquant2025,
+  title={TurboQuant},
+  author={Google DeepMind},
+  journal={arXiv:2504.19874},
   year={2025}
 }
 ```

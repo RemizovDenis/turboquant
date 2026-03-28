@@ -10,6 +10,7 @@ class TestPolarQuantizer:
 
     def test_init(self):
         from turboquant.core.polar_quant import PolarQuantizer
+
         q = PolarQuantizer(head_dim=128, bits=3, group_size=64, seed=42)
         assert q.head_dim == 128
         assert q.bits == 3
@@ -18,6 +19,7 @@ class TestPolarQuantizer:
 
     def test_init_invalid(self):
         from turboquant.core.polar_quant import PolarQuantizer
+
         with pytest.raises(ValueError):
             PolarQuantizer(head_dim=0)
         with pytest.raises(ValueError):
@@ -27,6 +29,7 @@ class TestPolarQuantizer:
 
     def test_forward_shape(self):
         from turboquant.core.polar_quant import PolarQuantizer
+
         q = PolarQuantizer(head_dim=64, bits=3, group_size=32)
         x = torch.randn(2, 4, 16, 64, dtype=torch.float16)
         quantized, scales = q(x)
@@ -36,6 +39,7 @@ class TestPolarQuantizer:
 
     def test_forward_empty(self):
         from turboquant.core.polar_quant import PolarQuantizer
+
         q = PolarQuantizer(head_dim=64)
         x = torch.empty(0, 64, dtype=torch.float16)
         quantized, scales = q(x)
@@ -43,6 +47,7 @@ class TestPolarQuantizer:
 
     def test_dequantize_roundtrip(self):
         from turboquant.core.polar_quant import PolarQuantizer
+
         q = PolarQuantizer(head_dim=128, bits=3, group_size=64)
         x = torch.randn(1, 2, 8, 128, dtype=torch.float16)
         q.calibrate([x])
@@ -56,6 +61,7 @@ class TestPolarQuantizer:
 
     def test_non_divisible_group_size(self):
         from turboquant.core.polar_quant import PolarQuantizer
+
         q = PolarQuantizer(head_dim=100, bits=3, group_size=64)
         x = torch.randn(1, 1, 4, 100, dtype=torch.float16)
         quantized, scales = q(x)
@@ -64,6 +70,7 @@ class TestPolarQuantizer:
 
     def test_calibrate(self):
         from turboquant.core.polar_quant import PolarQuantizer
+
         q = PolarQuantizer(head_dim=64, bits=3)
         data = [torch.randn(2, 4, 16, 64, dtype=torch.float16) for _ in range(3)]
         q.calibrate(data)
@@ -71,12 +78,14 @@ class TestPolarQuantizer:
 
     def test_calibrate_empty(self):
         from turboquant.core.polar_quant import PolarQuantizer
+
         q = PolarQuantizer(head_dim=64)
         with pytest.raises(ValueError):
             q.calibrate([])
 
     def test_orthogonality(self):
         from turboquant.core.polar_quant import PolarQuantizer
+
         q = PolarQuantizer(head_dim=64)
         identity = q.rotation @ q.rotation.T
         assert torch.allclose(identity, torch.eye(64), atol=1e-5)
@@ -87,12 +96,14 @@ class TestQJLResidualCorrector:
 
     def test_init(self):
         from turboquant.core.qjl import QJLResidualCorrector
+
         c = QJLResidualCorrector(head_dim=128)
         assert c.head_dim == 128
         assert c.sketch_dim == 32
 
     def test_encode_decode_shape(self):
         from turboquant.core.qjl import QJLResidualCorrector
+
         c = QJLResidualCorrector(head_dim=128, sketch_dim=32)
         r = torch.randn(2, 4, 16, 128, dtype=torch.float16)
         packed = c.encode(r)
@@ -103,6 +114,7 @@ class TestQJLResidualCorrector:
 
     def test_empty(self):
         from turboquant.core.qjl import QJLResidualCorrector
+
         c = QJLResidualCorrector(head_dim=64)
         r = torch.empty(0, 64, dtype=torch.float16)
         packed = c.encode(r)
@@ -110,11 +122,13 @@ class TestQJLResidualCorrector:
 
     def test_compress_ratio(self):
         from turboquant.core.qjl import QJLResidualCorrector
+
         c = QJLResidualCorrector(head_dim=128, sketch_dim=32)
         assert abs(c.compress_ratio() - 64.0) < 1e-6
 
     def test_pack_unpack(self):
         from turboquant.core.qjl import QJLResidualCorrector
+
         c = QJLResidualCorrector(head_dim=64, sketch_dim=37)
         bits = torch.randint(0, 2, (5, 37), dtype=torch.float32)
         packed = c._pack_bits(bits)
@@ -127,6 +141,7 @@ class TestTurboQuantKVCache:
 
     def test_compress_decompress(self):
         from turboquant.core.turboquant import TurboQuantConfig, TurboQuantKVCache
+
         config = TurboQuantConfig(head_dim=64, num_heads=4, device="cpu")
         with TurboQuantKVCache(config) as tq:
             k = torch.randn(1, 4, 16, 64, dtype=torch.float16)
@@ -138,6 +153,7 @@ class TestTurboQuantKVCache:
 
     def test_update(self):
         from turboquant.core.turboquant import TurboQuantConfig, TurboQuantKVCache
+
         config = TurboQuantConfig(head_dim=64, num_heads=4, device="cpu")
         with TurboQuantKVCache(config) as tq:
             k1 = torch.randn(1, 4, 8, 64, dtype=torch.float16)
@@ -152,6 +168,7 @@ class TestTurboQuantKVCache:
 
     def test_memory_usage(self):
         from turboquant.core.turboquant import TurboQuantConfig, TurboQuantKVCache
+
         config = TurboQuantConfig(head_dim=64, num_heads=4, device="cpu")
         with TurboQuantKVCache(config) as tq:
             k = torch.randn(1, 4, 32, 64, dtype=torch.float16)
@@ -165,9 +182,8 @@ class TestTurboQuantKVCache:
 
     def test_no_residual(self):
         from turboquant.core.turboquant import TurboQuantConfig, TurboQuantKVCache
-        config = TurboQuantConfig(
-            head_dim=64, num_heads=4, device="cpu", residual_correction=False
-        )
+
+        config = TurboQuantConfig(head_dim=64, num_heads=4, device="cpu", residual_correction=False)
         with TurboQuantKVCache(config) as tq:
             k = torch.randn(1, 4, 8, 64, dtype=torch.float16)
             v = torch.randn(1, 4, 8, 64, dtype=torch.float16)

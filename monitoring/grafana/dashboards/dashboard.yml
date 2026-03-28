@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: turboquant
+    orgId: 1
+    folder: TurboQuant
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /etc/grafana/provisioning/dashboards

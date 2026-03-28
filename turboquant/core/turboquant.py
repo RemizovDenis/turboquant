@@ -1,62 +1,32 @@
-"""TurboQuantKVCache — unified KV-cache compression interface.
-
-Combines PolarQuantizer (3-bit) and QJLResidualCorrector (1-bit) into a
-single production-ready module for compressing LLM KV-caches.
-
-Total cost: 3 bits (polar) + 1 bit (QJL) = 4 bits per element
-→ **4× memory reduction** versus FP16.
-
-Reference: TurboQuant (arXiv 2504.19874).
-
-Typical usage::
-
-    config = TurboQuantConfig(head_dim=128, num_heads=32)
-    with TurboQuantKVCache(config) as tq:
-        entry = tq.compress(keys, values)
-        keys_hat, values_hat = tq.decompress(entry)
-        print(tq.memory_usage(entry))
-"""
+"""Core TurboQuant KV-cache manager."""
 
 from __future__ import annotations
 
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pandas as pd
 import structlog
 import torch
-import torch.nn as nn
 
-from turboquant.core.polar_quant import PolarQuantizer
-from turboquant.core.qjl import QJLResidualCorrector
+from turboquant.core.polar_quant import PolarQuantConfig, PolarQuantizer
+from turboquant.core.qjl import QJLConfig, QJLResidualCorrector
+
+if TYPE_CHECKING:
+    from turboquant.core.adaptive_bitwidth import AdaptiveBitwithConfig
+    from turboquant.core.cross_layer_kv import CrossLayerConfig, CrossLayerKVCache
+    from turboquant.core.semantic_eviction import SemanticEvictionConfig, SemanticKVEviction
 
 log = structlog.get_logger(__name__)
 
 
-# ======================================================================
-# Data classes
-# ======================================================================
-
-
 @dataclass
 class TurboQuantConfig:
-    """Configuration for TurboQuantKVCache.
-
-    Attributes:
-        head_dim: Dimension of each attention head.
-        num_heads: Number of attention heads.
-        bits: Quantization bit-width for PolarQuantizer (default 3).
-        group_size: Elements per quantization group (default 64).
-        residual_correction: Enable QJL residual correction (default True).
-        sketch_dim: JL projection dimension. ``None`` → ``head_dim // 4``.
-        device: Target device string.
-        dtype: Target tensor dtype.
-        seed: Random seed for rotation / projection matrices.
-        max_seq_len: Maximum sequence length budget.
-    """
+    """Configuration for TurboQuantKVCache."""
 
     head_dim: int = 128
     num_heads: int = 32
@@ -64,32 +34,56 @@ class TurboQuantConfig:
     group_size: int = 64
     residual_correction: bool = True
     sketch_dim: int | None = None
+    use_triton_kernels: bool = True
+    use_hadamard: bool = True
     device: str = "cuda"
     dtype: torch.dtype = torch.float16
     seed: int = 42
     max_seq_len: int = 131072
+    cpu_offload_threshold_mb: float = 1024.0
+    enable_semantic_eviction: bool = False
+    enable_cross_layer_sharing: bool = False
+    enable_adaptive_bitwidth: bool = False
+    semantic_eviction_config: SemanticEvictionConfig | None = None
+    cross_layer_config: CrossLayerConfig | None = None
+    adaptive_bitwidth_config: AdaptiveBitwithConfig | None = None
+
+    @classmethod
+    def from_model_config(cls, model_config: Any) -> TurboQuantConfig:
+        """Build config from HuggingFace model config-like object."""
+        head_dim = None
+        num_heads = None
+
+        if hasattr(model_config, "hidden_size") and hasattr(model_config, "num_attention_heads"):
+            head_dim = int(model_config.hidden_size // model_config.num_attention_heads)
+            num_heads = int(model_config.num_attention_heads)
+
+        if hasattr(model_config, "head_dim"):
+            head_dim = int(model_config.head_dim)
+        if hasattr(model_config, "num_key_value_heads"):
+            num_heads = int(model_config.num_key_value_heads)
+
+        if head_dim is None or num_heads is None:
+            raise ValueError("Could not infer head_dim/num_heads from model config")
+
+        return cls(head_dim=head_dim, num_heads=num_heads)
 
 
 @dataclass
 class CacheEntry:
-    """Container for a single compressed KV-cache snapshot.
-
-    Attributes:
-        compressed_keys: ``(quantized_int8, scales_float32)`` pair.
-        compressed_values: ``(quantized_int8, scales_float32)`` pair.
-        residual_keys: Packed 1-bit residual for keys (or *None*).
-        residual_values: Packed 1-bit residual for values (or *None*).
-        metadata: Auxiliary information (shapes, dtypes, seq_len, …).
-    """
+    """Compressed KV cache entry."""
 
     compressed_keys: tuple[torch.Tensor, torch.Tensor]
     compressed_values: tuple[torch.Tensor, torch.Tensor]
     residual_keys: torch.Tensor | None = None
     residual_values: torch.Tensor | None = None
+    residual_scales_k: torch.Tensor | None = None
+    residual_scales_v: torch.Tensor | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: float = field(default_factory=time.monotonic)
+    access_count: int = 0
 
     def to(self, device: str | torch.device) -> CacheEntry:
-        """Move all tensors to *device* and return self."""
         self.compressed_keys = (
             self.compressed_keys[0].to(device),
             self.compressed_keys[1].to(device),
@@ -102,454 +96,510 @@ class CacheEntry:
             self.residual_keys = self.residual_keys.to(device)
         if self.residual_values is not None:
             self.residual_values = self.residual_values.to(device)
+        if self.residual_scales_k is not None:
+            self.residual_scales_k = self.residual_scales_k.to(device)
+        if self.residual_scales_v is not None:
+            self.residual_scales_v = self.residual_scales_v.to(device)
         return self
 
 
-# ======================================================================
-# Main class
-# ======================================================================
-
-
-class TurboQuantKVCache(nn.Module):
-    """Unified KV-cache compressor combining polar quantization and QJL residual correction.
-
-    Thread-safe: the ``update`` method acquires an internal lock.
-    Context-manager aware: ``__exit__`` releases GPU tensors.
-
-    Attributes:
-        config: Active ``TurboQuantConfig``.
-        polar: ``PolarQuantizer`` instance.
-        qjl: ``QJLResidualCorrector`` instance (or *None* when disabled).
-    """
+class TurboQuantKVCache:
+    """Unified KV-cache compressor with optional QJL residual correction."""
 
     def __init__(self, config: TurboQuantConfig) -> None:
-        """Initialise TurboQuantKVCache.
-
-        Args:
-            config: Complete configuration dataclass.
-        """
-        super().__init__()
         self.config = config
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
-        # Resolve device: fall back to CPU if CUDA is requested but unavailable
-        effective_device = config.device
-        if "cuda" in effective_device and not torch.cuda.is_available():
-            log.info("CUDA not available, falling back to CPU")
-            effective_device = "cpu"
-        self._device = effective_device
+        if "cuda" in config.device and not torch.cuda.is_available():
+            log.warning("cuda requested but unavailable, using cpu")
+            self.device = torch.device("cpu")
+        else:
+            self.device = torch.device(config.device)
 
-        # Core quantizer
-        self.polar = PolarQuantizer(
+        qcfg = PolarQuantConfig(
             head_dim=config.head_dim,
             bits=config.bits,
             group_size=config.group_size,
             seed=config.seed,
-        ).to(effective_device)
+            use_hadamard=config.use_hadamard,
+        )
+        self.quantizer = PolarQuantizer(qcfg).to(self.device)
 
-        # Residual corrector
-        self.qjl: QJLResidualCorrector | None = None
+        self.corrector: QJLResidualCorrector | None = None
         if config.residual_correction:
-            self.qjl = QJLResidualCorrector(
+            self.corrector = QJLResidualCorrector(
+                QJLConfig(
+                    head_dim=config.head_dim,
+                    sketch_dim=config.sketch_dim,
+                    seed=config.seed + 1,
+                )
+            ).to(self.device)
+
+        self.semantic_evictor: SemanticKVEviction | None = None
+        self.cross_layer_cache: CrossLayerKVCache | None = None
+        self.adaptive_quantizer: AdaptiveBitwidthQuantizer | None = None
+        self._cross_base_cache: TurboQuantKVCache | None = None
+        self._last_memory_usage: dict[str, float] | None = None
+
+        if config.enable_semantic_eviction:
+            from turboquant.core.semantic_eviction import (
+                SemanticEvictionConfig,
+                SemanticKVEviction,
+            )
+
+            sem_cfg = config.semantic_eviction_config or SemanticEvictionConfig(
+                max_seq_len=config.max_seq_len,
+                eviction_target_len=max(config.max_seq_len // 2, 1),
+                device=str(self.device),
+                dtype=config.dtype,
+            )
+            self.semantic_evictor = SemanticKVEviction(
+                config=sem_cfg,
                 head_dim=config.head_dim,
-                sketch_dim=config.sketch_dim,
-                seed=config.seed + 1,
-            ).to(effective_device)
+                num_heads=config.num_heads,
+            )
+
+        if config.enable_adaptive_bitwidth:
+            from turboquant.core.adaptive_bitwidth import (
+                AdaptiveBitwidthQuantizer,
+                AdaptiveBitwithConfig,
+            )
+
+            adapt_cfg = config.adaptive_bitwidth_config or AdaptiveBitwithConfig(
+                head_dim=config.head_dim,
+                num_heads=config.num_heads,
+                vocab_size=128_000,
+                device=str(self.device),
+                dtype=config.dtype,
+            )
+            self.adaptive_quantizer = AdaptiveBitwidthQuantizer(adapt_cfg)
+
+        if config.enable_cross_layer_sharing:
+            from turboquant.core.cross_layer_kv import CrossLayerConfig, CrossLayerKVCache
+
+            cross_cfg = config.cross_layer_config or CrossLayerConfig(
+                num_layers=32,
+                device=str(self.device),
+                dtype=config.dtype,
+            )
+            base_cfg = self._base_config_for_cross()
+            self._cross_base_cache = TurboQuantKVCache(base_cfg)
+            self.cross_layer_cache = CrossLayerKVCache(cross_cfg, self._cross_base_cache)
 
         log.info(
-            "TurboQuantKVCache.__init__",
+            "TurboQuantKVCache.init",
             head_dim=config.head_dim,
             num_heads=config.num_heads,
-            bits=config.bits,
             residual=config.residual_correction,
-            device=effective_device,
+            device=str(self.device),
         )
-
-    # ------------------------------------------------------------------
-    # Context manager
-    # ------------------------------------------------------------------
 
     def __enter__(self) -> TurboQuantKVCache:
         return self
 
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        """Release GPU buffers."""
-        self._clear_gpu()
-
-    def _clear_gpu(self) -> None:
-        """Delete GPU tensors and empty the CUDA cache."""
-        if torch.cuda.is_available():
+    def __exit__(self, *_: Any) -> None:
+        if torch.cuda.is_available() and self.device.type == "cuda":
             torch.cuda.empty_cache()
-        log.debug("_clear_gpu")
 
-    # ------------------------------------------------------------------
-    # Compress / Decompress
-    # ------------------------------------------------------------------
+    def _base_config_for_cross(self) -> TurboQuantConfig:
+        """Create a plain TurboQuant config for cross-layer anchor compression."""
+        return TurboQuantConfig(
+            head_dim=self.config.head_dim,
+            num_heads=self.config.num_heads,
+            bits=self.config.bits,
+            group_size=self.config.group_size,
+            residual_correction=self.config.residual_correction,
+            sketch_dim=self.config.sketch_dim,
+            use_triton_kernels=self.config.use_triton_kernels,
+            use_hadamard=self.config.use_hadamard,
+            device=str(self.device),
+            dtype=self.config.dtype,
+            seed=self.config.seed,
+            max_seq_len=self.config.max_seq_len,
+            cpu_offload_threshold_mb=self.config.cpu_offload_threshold_mb,
+            enable_semantic_eviction=False,
+            enable_cross_layer_sharing=False,
+            enable_adaptive_bitwidth=False,
+        )
 
     def compress(
         self,
         keys: torch.Tensor,
         values: torch.Tensor,
+        layer_id: int | None = None,
+        token_ids: torch.Tensor | None = None,
+        attention_entropy: torch.Tensor | None = None,
     ) -> CacheEntry:
-        """Compress a KV-cache pair.
+        """Compress key/value tensors into a cache entry.
 
         Args:
-            keys: Key tensor  ``[batch, num_heads, seq_len, head_dim]`` in FP16/BF16.
-            values: Value tensor of the same shape.
-
-        Returns:
-            ``CacheEntry`` with compressed data and metadata.
-
-        Raises:
-            RuntimeError: On GPU OOM — automatically retries on CPU.
-        """
-        try:
-            return self._compress_impl(keys, values)
-        except torch.cuda.OutOfMemoryError:
-            log.warning("OOM during compress — offloading to CPU")
-            return self._compress_impl(keys.cpu(), values.cpu())
-
-    def _compress_impl(
-        self,
-        keys: torch.Tensor,
-        values: torch.Tensor,
-    ) -> CacheEntry:
-        """Internal compression implementation."""
-        device = keys.device
-        original_dtype = keys.dtype
-
-        # Polar quantize keys
-        qk, sk = self.polar(keys)
-        qv, sv = self.polar(values)
-
-        rk: torch.Tensor | None = None
-        rv: torch.Tensor | None = None
-
-        if self.qjl is not None:
-            # Compute residual from polar dequant
-            keys_hat = self.polar.dequantize(qk, sk)
-            values_hat = self.polar.dequantize(qv, sv)
-            res_k = (keys.float() - keys_hat.float()).to(keys.dtype)
-            res_v = (values.float() - values_hat.float()).to(values.dtype)
-            rk = self.qjl.encode(res_k)
-            rv = self.qjl.encode(res_v)
-
-        meta: dict[str, Any] = {
-            "original_shape": list(keys.shape),
-            "original_dtype": str(original_dtype),
-            "seq_len": keys.shape[2] if keys.dim() >= 3 else keys.shape[0],
-            "device": str(device),
-            "compressed_at": time.time(),
-        }
-
-        log.debug("compress", shape=list(keys.shape), device=str(device))
-
-        return CacheEntry(
-            compressed_keys=(qk, sk),
-            compressed_values=(qv, sv),
-            residual_keys=rk,
-            residual_values=rv,
-            metadata=meta,
-        )
-
-    def decompress(
-        self,
-        entry: CacheEntry,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Decompress a ``CacheEntry`` back to FP16 key/value tensors.
-
-        Args:
-            entry: Previously compressed cache entry.
-
-        Returns:
-            Tuple ``(keys, values)`` each as FP16 tensors with the original shape.
-        """
-        qk, sk = entry.compressed_keys
-        qv, sv = entry.compressed_values
-
-        keys_hat = self.polar.dequantize(qk, sk)
-        values_hat = self.polar.dequantize(qv, sv)
-
-        if self.qjl is not None and entry.residual_keys is not None:
-            original_shape = tuple(entry.metadata.get("original_shape", keys_hat.shape))
-            res_k = self.qjl.decode(entry.residual_keys, original_shape)
-            res_v = self.qjl.decode(entry.residual_values, original_shape)  # type: ignore[arg-type]
-            keys_hat = (keys_hat.float() + res_k.float()).to(torch.float16)
-            values_hat = (values_hat.float() + res_v.float()).to(torch.float16)
-
-        log.debug("decompress", shape=list(keys_hat.shape))
-        return keys_hat, values_hat
-
-    # ------------------------------------------------------------------
-    # Incremental update
-    # ------------------------------------------------------------------
-
-    def update(
-        self,
-        entry: CacheEntry,
-        new_keys: torch.Tensor,
-        new_values: torch.Tensor,
-    ) -> CacheEntry:
-        """Append new key/value tokens to an existing compressed cache.
-
-        This is thread-safe: an internal lock serialises concurrent updates.
-
-        Args:
-            entry: Existing ``CacheEntry``.
-            new_keys: New key tokens ``[batch, num_heads, new_seq, head_dim]``.
-            new_values: Corresponding value tokens.
-
-        Returns:
-            Updated ``CacheEntry`` with the appended data.
+            keys: Key tensor.
+            values: Value tensor.
+            layer_id: Optional layer id used by cross-layer compression.
+            token_ids: Optional token ids for adaptive bitwidth.
+            attention_entropy: Optional entropy signal for adaptive bitwidth.
         """
         with self._lock:
-            return self._update_impl(entry, new_keys, new_values)
+            keys_in = keys.to(self.device)
+            values_in = values.to(self.device)
+            eviction_result: Any = None
 
-    def _update_impl(
-        self,
-        entry: CacheEntry,
-        new_keys: torch.Tensor,
-        new_values: torch.Tensor,
-    ) -> CacheEntry:
-        """Non-locked update implementation.
+            if self.semantic_evictor is not None:
+                seq_len = int(keys_in.shape[2]) if keys_in.ndim >= 3 else 0
+                if seq_len > int(self.semantic_evictor.config.eviction_target_len):
+                    keys_in, values_in, eviction_result = self.semantic_evictor.evict(
+                        keys_in, values_in, layer_id or 0
+                    )
 
-        Strategy: compress the new slice independently and concatenate the
-        compressed representations along the sequence dimension.
-        """
-        # Compress the incremental slice
-        new_entry = self._compress_impl(new_keys, new_values)
+            try:
+                entry: CacheEntry
+                if self.cross_layer_cache is not None and layer_id is not None:
+                    cross_entry = self.cross_layer_cache.compress(layer_id, keys_in, values_in)
+                    if cross_entry.is_anchor and cross_entry.anchor_entry is not None:
+                        entry = cross_entry.anchor_entry
+                    else:
+                        if cross_entry.delta_packed is None or cross_entry.delta_scales is None:
+                            raise ValueError(
+                                "delta payload missing for non-anchor cross-layer entry"
+                            )
+                        entry = CacheEntry(
+                            compressed_keys=(
+                                cross_entry.delta_packed[0],
+                                cross_entry.delta_scales[0],
+                            ),
+                            compressed_values=(
+                                cross_entry.delta_packed[1],
+                                cross_entry.delta_scales[1],
+                            ),
+                            metadata={
+                                "original_shape": cross_entry.metadata["original_shape"],
+                                "seq_len": int(cross_entry.metadata["original_shape"][2]),
+                                "device": str(keys_in.device),
+                            },
+                        )
+                    entry.metadata["cross_layer_entry"] = cross_entry
+                elif self.adaptive_quantizer is not None:
+                    adaptive_cache = self.adaptive_quantizer.compress(
+                        keys_in,
+                        values_in,
+                        token_ids=token_ids,
+                        attention_entropy=attention_entropy,
+                    )
+                    empty_u8 = torch.empty((0,), dtype=torch.uint8, device=self.device)
+                    empty_f32 = torch.empty((0,), dtype=torch.float32, device=self.device)
+                    entry = CacheEntry(
+                        compressed_keys=(empty_u8, empty_f32),
+                        compressed_values=(empty_u8.clone(), empty_f32.clone()),
+                        metadata={
+                            "original_shape": list(adaptive_cache.original_shape),
+                            "seq_len": int(adaptive_cache.original_shape[2]),
+                            "device": str(keys_in.device),
+                            "adaptive_cache": adaptive_cache,
+                        },
+                    )
+                else:
+                    entry = self._compress_impl(keys_in, values_in)
+            except torch.cuda.OutOfMemoryError:
+                log.warning("OOM during compress, retrying on CPU")
+                self.device = torch.device("cpu")
+                self.quantizer = self.quantizer.to(self.device)
+                if self.corrector is not None:
+                    self.corrector = self.corrector.to(self.device)
+                entry = self._compress_impl(keys.cpu(), values.cpu())
 
-        # Concatenate quantized tensors along seq dimension (dim=2)
-        seq_dim = 2
+            if eviction_result is not None:
+                entry.metadata["semantic_eviction"] = {
+                    "kept_tokens": int(eviction_result.kept_indices.numel()),
+                    "evicted_tokens": int(eviction_result.evicted_indices.numel()),
+                    "eviction_ratio": eviction_result.eviction_ratio,
+                }
 
-        merged_qk = torch.cat(
-            [entry.compressed_keys[0], new_entry.compressed_keys[0]], dim=seq_dim
-        )
-        merged_sk = torch.cat(
-            [entry.compressed_keys[1], new_entry.compressed_keys[1]], dim=seq_dim
-        )
-        merged_qv = torch.cat(
-            [entry.compressed_values[0], new_entry.compressed_values[0]], dim=seq_dim
-        )
-        merged_sv = torch.cat(
-            [entry.compressed_values[1], new_entry.compressed_values[1]], dim=seq_dim
-        )
+            mem = self.memory_usage(entry)
+            self._last_memory_usage = dict(mem)
+            log.info(
+                "compress",
+                compression_ratio=mem["compression_ratio"],
+                savings_percent=mem["actual_savings_percent"],
+            )
+            if mem["total_mb"] > self.config.cpu_offload_threshold_mb:
+                entry = self._cpu_offload(entry)
+            return entry
 
-        merged_rk: torch.Tensor | None = None
-        merged_rv: torch.Tensor | None = None
-        if (
-            entry.residual_keys is not None
-            and new_entry.residual_keys is not None
-            and entry.residual_values is not None
-            and new_entry.residual_values is not None
-        ):
-            merged_rk = torch.cat([entry.residual_keys, new_entry.residual_keys], dim=seq_dim)
-            merged_rv = torch.cat([entry.residual_values, new_entry.residual_values], dim=seq_dim)
+    def _compress_impl(self, keys: torch.Tensor, values: torch.Tensor) -> CacheEntry:
+        k_packed, k_scales = self.quantizer(keys)
+        v_packed, v_scales = self.quantizer(values)
 
-        # Update metadata
-        old_shape = entry.metadata["original_shape"]
-        new_seq = old_shape[2] + new_keys.shape[2]
-        merged_shape = list(old_shape)
-        merged_shape[2] = new_seq
+        rk = rv = None
+        rsk = rsv = None
+        if self.corrector is not None:
+            k_hat = self.quantizer.dequantize(k_packed, k_scales, tuple(keys.shape))
+            v_hat = self.quantizer.dequantize(v_packed, v_scales, tuple(values.shape))
 
-        meta = dict(entry.metadata)
-        meta["original_shape"] = merged_shape
-        meta["seq_len"] = new_seq
-        meta["updated_at"] = time.time()
+            r_bits_k, rsk = self.corrector.encode_with_scale((keys - k_hat).to(torch.float16))
+            r_bits_v, rsv = self.corrector.encode_with_scale((values - v_hat).to(torch.float16))
+            rk, rv = r_bits_k, r_bits_v
 
-        log.debug("update", old_seq=old_shape[2], new_seq=new_seq)
+        meta = {
+            "original_shape": list(keys.shape),
+            "original_dtype": str(keys.dtype),
+            "seq_len": int(keys.shape[2]) if keys.dim() >= 3 else int(keys.shape[0]),
+            "device": str(keys.device),
+        }
 
         return CacheEntry(
-            compressed_keys=(merged_qk, merged_sk),
-            compressed_values=(merged_qv, merged_sv),
-            residual_keys=merged_rk,
-            residual_values=merged_rv,
+            compressed_keys=(k_packed, k_scales),
+            compressed_values=(v_packed, v_scales),
+            residual_keys=rk,
+            residual_values=rv,
+            residual_scales_k=rsk,
+            residual_scales_v=rsv,
             metadata=meta,
         )
 
-    # ------------------------------------------------------------------
-    # Memory reporting
-    # ------------------------------------------------------------------
+    def decompress(self, entry: CacheEntry) -> tuple[torch.Tensor, torch.Tensor]:
+        """Decompress cache entry back to key/value tensors."""
+        with self._lock:
+            entry.access_count += 1
+            if "cross_layer_entry" in entry.metadata:
+                if self.cross_layer_cache is None:
+                    raise RuntimeError(
+                        "cross-layer entry present but cross_layer_cache is not initialized"
+                    )
+                cross_entry = cast(Any, entry.metadata["cross_layer_entry"])
+                return self.cross_layer_cache.decompress(cross_entry)
+
+            if "adaptive_cache" in entry.metadata:
+                if self.adaptive_quantizer is None:
+                    raise RuntimeError(
+                        "adaptive entry present but adaptive_quantizer is not initialized"
+                    )
+                adaptive_cache = cast(Any, entry.metadata["adaptive_cache"])
+                shape = tuple(int(v) for v in entry.metadata["original_shape"])
+                return self.adaptive_quantizer.decompress(adaptive_cache, shape)
+
+            shape = tuple(int(v) for v in entry.metadata["original_shape"])
+            k = self.quantizer.dequantize(entry.compressed_keys[0], entry.compressed_keys[1], shape)
+            v = self.quantizer.dequantize(
+                entry.compressed_values[0], entry.compressed_values[1], shape
+            )
+
+            if (
+                self.corrector is not None
+                and entry.residual_keys is not None
+                and entry.residual_values is not None
+            ):
+                k_corr = self.corrector.decode(
+                    entry.residual_keys,
+                    shape,
+                    scale=float(entry.residual_scales_k.mean().item())
+                    if entry.residual_scales_k is not None
+                    else 1.0,
+                )
+                v_corr = self.corrector.decode(
+                    entry.residual_values,
+                    shape,
+                    scale=float(entry.residual_scales_v.mean().item())
+                    if entry.residual_scales_v is not None
+                    else 1.0,
+                )
+                k = (k.float() + k_corr.float()).to(torch.float16)
+                v = (v.float() + v_corr.float()).to(torch.float16)
+            return k, v
+
+    def update(
+        self, entry: CacheEntry, new_keys: torch.Tensor, new_values: torch.Tensor
+    ) -> CacheEntry:
+        """Append new tokens (sliding-window constrained by max_seq_len)."""
+        with self._lock:
+            keys, values = self.decompress(entry)
+            keys = torch.cat([keys, new_keys.to(keys.device)], dim=2)
+            values = torch.cat([values, new_values.to(values.device)], dim=2)
+
+            if keys.shape[2] > self.config.max_seq_len:
+                keys = keys[:, :, -self.config.max_seq_len :, :]
+                values = values[:, :, -self.config.max_seq_len :, :]
+
+            return self.compress(keys, values)
 
     def memory_usage(self, entry: CacheEntry) -> dict[str, float]:
-        """Report memory consumption of a ``CacheEntry``.
+        """Return detailed memory accounting."""
 
-        Args:
-            entry: Compressed cache entry.
+        def nbytes(t: torch.Tensor | None) -> int:
+            return 0 if t is None else int(t.nelement() * t.element_size())
 
-        Returns:
-            Dictionary with keys ``bytes``, ``mb``, ``fp16_bytes``,
-            ``fp16_mb``, ``ratio``, ``savings_percent``.
-        """
-        def _tensor_bytes(t: torch.Tensor | None) -> int:
-            return t.nelement() * t.element_size() if t is not None else 0
+        if "adaptive_cache" in entry.metadata:
+            adaptive_cache = cast(Any, entry.metadata["adaptive_cache"])
+            total_bytes = 0
+            for packed, scales, mask, _ in adaptive_cache.components:
+                total_bytes += nbytes(packed)
+                total_bytes += nbytes(scales)
+                total_bytes += nbytes(mask)
 
-        compressed_bytes = (
-            _tensor_bytes(entry.compressed_keys[0])
-            + _tensor_bytes(entry.compressed_keys[1])
-            + _tensor_bytes(entry.compressed_values[0])
-            + _tensor_bytes(entry.compressed_values[1])
-            + _tensor_bytes(entry.residual_keys)
-            + _tensor_bytes(entry.residual_values)
+            shape = entry.metadata.get("original_shape", [1, 1, 1, 1])
+            fp16_baseline_bytes = int(np.prod(shape)) * 2 * 2
+            ratio = total_bytes / max(fp16_baseline_bytes, 1)
+            return {
+                "kv_compressed_bytes": float(total_bytes),
+                "residual_bytes": 0.0,
+                "scales_bytes": 0.0,
+                "total_bytes": float(total_bytes),
+                "total_mb": total_bytes / (1024**2),
+                "fp16_baseline_mb": fp16_baseline_bytes / (1024**2),
+                "compression_ratio": ratio,
+                "actual_savings_percent": (1.0 - ratio) * 100.0,
+                "bytes": float(total_bytes),
+                "mb": total_bytes / (1024**2),
+                "ratio": ratio,
+            }
+
+        kv_compressed_bytes = (
+            nbytes(entry.compressed_keys[0])
+            + nbytes(entry.compressed_keys[1])
+            + nbytes(entry.compressed_values[0])
+            + nbytes(entry.compressed_values[1])
         )
+        residual_bytes = nbytes(entry.residual_keys) + nbytes(entry.residual_values)
+        scales_bytes = nbytes(entry.residual_scales_k) + nbytes(entry.residual_scales_v)
+        total_bytes = kv_compressed_bytes + residual_bytes + scales_bytes
 
-        # FP16 baseline
         shape = entry.metadata.get("original_shape", [1, 1, 1, 1])
-        fp16_bytes = int(np.prod(shape)) * 2 * 2  # keys + values, 2 bytes each
-
-        ratio = compressed_bytes / max(fp16_bytes, 1)
+        fp16_baseline_bytes = int(np.prod(shape)) * 2 * 2
+        ratio = total_bytes / max(fp16_baseline_bytes, 1)
 
         return {
-            "bytes": float(compressed_bytes),
-            "mb": compressed_bytes / (1024 * 1024),
-            "fp16_bytes": float(fp16_bytes),
-            "fp16_mb": fp16_bytes / (1024 * 1024),
+            "kv_compressed_bytes": float(kv_compressed_bytes),
+            "residual_bytes": float(residual_bytes),
+            "scales_bytes": float(scales_bytes),
+            "total_bytes": float(total_bytes),
+            "total_mb": total_bytes / (1024**2),
+            "fp16_baseline_mb": fp16_baseline_bytes / (1024**2),
+            "compression_ratio": ratio,
+            "actual_savings_percent": (1.0 - ratio) * 100.0,
+            # Legacy aliases for older tests/callers.
+            "bytes": float(total_bytes),
+            "mb": total_bytes / (1024**2),
             "ratio": ratio,
-            "savings_percent": (1.0 - ratio) * 100.0,
         }
 
-    # ------------------------------------------------------------------
-    # Benchmark
-    # ------------------------------------------------------------------
+    def latest_memory_usage(self) -> dict[str, float]:
+        """Return last computed memory report without triggering recompression."""
+        with self._lock:
+            if self._last_memory_usage is not None:
+                return dict(self._last_memory_usage)
+
+            shape = [1, self.config.num_heads, 1, self.config.head_dim]
+            fp16_baseline_bytes = int(np.prod(shape)) * 2 * 2
+            fp16_baseline_mb = fp16_baseline_bytes / (1024**2)
+            return {
+                "kv_compressed_bytes": float(fp16_baseline_bytes),
+                "residual_bytes": 0.0,
+                "scales_bytes": 0.0,
+                "total_bytes": float(fp16_baseline_bytes),
+                "total_mb": fp16_baseline_mb,
+                "fp16_baseline_mb": fp16_baseline_mb,
+                "compression_ratio": 1.0,
+                "actual_savings_percent": 0.0,
+                "bytes": float(fp16_baseline_bytes),
+                "mb": fp16_baseline_mb,
+                "ratio": 1.0,
+            }
 
     def benchmark(
         self,
         seq_lengths: list[int] | None = None,
         batch_size: int = 1,
-        warmup: int = 3,
-        iterations: int = 10,
+        num_heads: int | None = None,
     ) -> pd.DataFrame:
-        """Run an automated compression/decompression benchmark.
-
-        Args:
-            seq_lengths: List of sequence lengths to test.
-                Defaults to ``[1024, 4096, 16384, 65536]``.
-            batch_size: Batch size for synthetic data.
-            warmup: Number of warm-up iterations (not timed).
-            iterations: Number of timed iterations for averaging.
-
-        Returns:
-            ``pd.DataFrame`` with columns: ``seq_len``, ``compress_ms``,
-            ``decompress_ms``, ``memory_mb``, ``ratio``, ``savings_pct``.
-        """
+        """Benchmark compression/decompression latency and memory."""
         if seq_lengths is None:
-            seq_lengths = [1024, 4096, 16384, 65536]
+            seq_lengths = [1024, 4096, 16384, 65536, 131072]
+        heads = num_heads or self.config.num_heads
 
-        device = self._device
-        rows: list[dict[str, Any]] = []
-
-        for seq_len in seq_lengths:
-            # Cap at max_seq_len
-            sl = min(seq_len, self.config.max_seq_len)
-            shape = (batch_size, self.config.num_heads, sl, self.config.head_dim)
-
-            try:
-                k = torch.randn(shape, dtype=self.config.dtype, device=device)
-                v = torch.randn(shape, dtype=self.config.dtype, device=device)
-            except torch.cuda.OutOfMemoryError:
-                log.warning("benchmark: OOM at seq_len=%d, skipping", sl)
-                continue
-
-            # Warmup
-            for _ in range(warmup):
-                e = self.compress(k, v)
-                _ = self.decompress(e)
-
-            # Timed compress
-            if "cuda" in device:
-                torch.cuda.synchronize()
-            t0 = time.perf_counter()
-            for _ in range(iterations):
-                e = self.compress(k, v)
-            if "cuda" in device:
-                torch.cuda.synchronize()
-            compress_ms = (time.perf_counter() - t0) / iterations * 1000
-
-            # Timed decompress
-            if "cuda" in device:
-                torch.cuda.synchronize()
-            t0 = time.perf_counter()
-            for _ in range(iterations):
-                _ = self.decompress(e)
-            if "cuda" in device:
-                torch.cuda.synchronize()
-            decompress_ms = (time.perf_counter() - t0) / iterations * 1000
-
-            mem = self.memory_usage(e)
-
-            rows.append({
-                "seq_len": sl,
-                "compress_ms": round(compress_ms, 2),
-                "decompress_ms": round(decompress_ms, 2),
-                "memory_mb": round(mem["mb"], 2),
-                "fp16_mb": round(mem["fp16_mb"], 2),
-                "ratio": round(mem["ratio"], 4),
-                "savings_pct": round(mem["savings_percent"], 1),
-            })
-
-            log.info(
-                "benchmark",
-                seq_len=sl,
-                compress_ms=round(compress_ms, 2),
-                decompress_ms=round(decompress_ms, 2),
-                savings_pct=round(mem["savings_percent"], 1),
+        rows: list[dict[str, float]] = []
+        for sl in seq_lengths:
+            xk = torch.randn(
+                batch_size, heads, sl, self.config.head_dim, dtype=torch.float16, device=self.device
             )
+            xv = torch.randn_like(xk)
+            t0 = time.perf_counter()
+            entry = self.compress(xk, xv)
+            compress_ms = (time.perf_counter() - t0) * 1000.0
 
-            # Free
-            del k, v, e
+            t0 = time.perf_counter()
+            dk, dv = self.decompress(entry)
+            decompress_ms = (time.perf_counter() - t0) * 1000.0
 
+            mse = (
+                float(
+                    ((xk.float() - dk.float()) ** 2).mean().item()
+                    + ((xv.float() - dv.float()) ** 2).mean().item()
+                )
+                / 2.0
+            )
+            mem = self.memory_usage(entry)
+
+            rows.append(
+                {
+                    "seq_len": float(sl),
+                    "compress_ms": compress_ms,
+                    "decompress_ms": decompress_ms,
+                    "memory_mb": mem["total_mb"],
+                    "ratio": mem["compression_ratio"],
+                    "mse": mse,
+                }
+            )
         return pd.DataFrame(rows)
 
-    # ------------------------------------------------------------------
-    # ONNX export
-    # ------------------------------------------------------------------
+    def export_onnx(self, path: str, example_seq_len: int = 2048) -> None:
+        """Export small ONNX wrappers for compress/decompress paths."""
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
 
-    def export_onnx(self, path: str) -> None:
-        """Export the polar quantizer to ONNX format.
+        class CompressModule(torch.nn.Module):
+            def __init__(self, cache: TurboQuantKVCache) -> None:
+                super().__init__()
+                self.cache = cache
 
-        Args:
-            path: Destination ``.onnx`` file path.
+            def forward(
+                self, k: torch.Tensor, v: torch.Tensor
+            ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+                k_p, k_s = self.cache.quantizer(k)
+                v_p, v_s = self.cache.quantizer(v)
+                return k_p, k_s, v_p, v_s
 
-        Note:
-            Exports only the polar quantizer forward pass. QJL residual
-            correction is not included because ONNX does not support
-            bit-packing natively.
-        """
-        from pathlib import Path as _Path
+        class DecompressModule(torch.nn.Module):
+            def __init__(self, cache: TurboQuantKVCache, shape: tuple[int, int, int, int]) -> None:
+                super().__init__()
+                self.cache = cache
+                self.shape = shape
 
-        _Path(path).parent.mkdir(parents=True, exist_ok=True)
+            def forward(
+                self, k_p: torch.Tensor, k_s: torch.Tensor, v_p: torch.Tensor, v_s: torch.Tensor
+            ) -> tuple[torch.Tensor, torch.Tensor]:
+                dk = self.cache.quantizer.dequantize(k_p, k_s, self.shape)
+                dv = self.cache.quantizer.dequantize(v_p, v_s, self.shape)
+                return dk, dv
 
-        dummy = torch.randn(
-            1, self.config.num_heads, 16, self.config.head_dim,
-            dtype=torch.float32,
-            device="cpu",
-        )
-        polar_cpu = self.polar.cpu()
+        shape = (1, self.config.num_heads, example_seq_len, self.config.head_dim)
+        k = torch.randn(shape, dtype=torch.float16, device=self.device)
+        v = torch.randn(shape, dtype=torch.float16, device=self.device)
 
+        comp = CompressModule(self).to(self.device)
         torch.onnx.export(
-            polar_cpu,
-            (dummy,),
-            path,
-            input_names=["kv_cache"],
-            output_names=["quantized", "scales"],
-            dynamic_axes={
-                "kv_cache": {0: "batch", 2: "seq_len"},
-                "quantized": {0: "batch", 2: "seq_len"},
-                "scales": {0: "batch", 2: "seq_len"},
-            },
+            comp, (k, v), str(p.with_name(p.stem + "_compress.onnx")), opset_version=17
+        )
+
+        k_p, k_s = self.quantizer(k)
+        v_p, v_s = self.quantizer(v)
+        decomp = DecompressModule(self, shape).to(self.device)
+        torch.onnx.export(
+            decomp,
+            (k_p, k_s, v_p, v_s),
+            str(p.with_name(p.stem + "_decompress.onnx")),
             opset_version=17,
         )
-        # Move back to original device
-        self.polar.to(self._device)
-        log.info("export_onnx", path=path)
 
-    # ------------------------------------------------------------------
-    # Repr
-    # ------------------------------------------------------------------
-
-    def extra_repr(self) -> str:
-        bits_total = self.config.bits + (1 if self.config.residual_correction else 0)
-        return (
-            f"head_dim={self.config.head_dim}, num_heads={self.config.num_heads}, "
-            f"bits_total={bits_total}, device={self._device}"
-        )
+    def _cpu_offload(self, entry: CacheEntry) -> CacheEntry:
+        """Move all cache tensors to CPU."""
+        log.info("cpu_offload_triggered")
+        return entry.to("cpu")

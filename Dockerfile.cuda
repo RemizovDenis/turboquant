@@ -1,0 +1,32 @@
+ARG CUDA_VERSION=12.1
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn8-runtime-ubuntu22.04 AS base
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    NVIDIA_VISIBLE_DEVICES=all
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3-pip python3-venv build-essential curl && \
+    rm -rf /var/lib/apt/lists/*
+
+FROM base AS builder
+WORKDIR /app
+COPY pyproject.toml README.md ./
+COPY turboquant ./turboquant
+RUN python3.11 -m pip install --upgrade pip && python3.11 -m pip install --no-cache-dir .
+
+FROM base AS runtime
+RUN useradd --uid 1000 --create-home appuser
+WORKDIR /app
+COPY --from=builder /usr/local/lib/python3.11/dist-packages /usr/local/lib/python3.11/dist-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+COPY turboquant ./turboquant
+COPY .env.example ./.env.example
+
+USER appuser
+EXPOSE 11435
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD python3.11 -c "import urllib.request; urllib.request.urlopen('http://localhost:11435/health', timeout=3)" || exit 1
+CMD ["turboquant-proxy"]

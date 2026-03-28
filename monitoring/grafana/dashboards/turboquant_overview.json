@@ -1,0 +1,16 @@
+{
+  "title": "TurboQuant Overview",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "panels": [
+    {"type": "timeseries", "title": "Expert Cache Hit Rate", "targets": [{"expr": "turboquant_expert_hit_rate"}]},
+    {"type": "timeseries", "title": "KV Compression Ratio", "targets": [{"expr": "turboquant_kv_compression_ratio"}]},
+    {"type": "timeseries", "title": "GPU Memory Usage", "targets": [{"expr": "turboquant_gpu_memory_mb"}]},
+    {"type": "timeseries", "title": "CPU Memory Usage", "targets": [{"expr": "turboquant_cpu_memory_mb"}]},
+    {"type": "timeseries", "title": "Tokens Per Second", "targets": [{"expr": "turboquant_tokens_per_second"}]},
+    {"type": "timeseries", "title": "Prefetch Accuracy", "targets": [{"expr": "turboquant_prefetch_accuracy"}]}
+  ],
+  "templating": {"list": []},
+  "annotations": {"list": []}
+}
