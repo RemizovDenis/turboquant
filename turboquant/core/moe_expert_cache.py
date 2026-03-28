@@ -45,6 +45,7 @@ class ExpertCacheConfig:
     eviction_policy: str = "arc"
     pin_memory: bool = True
     transfer_streams: int = 2
+    resident_protection_ms: float = 12.0
     device: str = "cuda"
 
 
@@ -233,6 +234,7 @@ class DynamicExpertCache:
         self._gpu_experts: set[tuple[int, int]] = set()
         self._pending_prefetch: set[tuple[int, int]] = set()
         self._prefetched_resident: set[tuple[int, int]] = set()
+        self._protected_until: dict[tuple[int, int], float] = {}
         self._prefetch_queue: deque[tuple[int, int]] = deque(
             maxlen=max(1, config.prefetch_depth * config.num_layers)
         )
@@ -303,6 +305,7 @@ class DynamicExpertCache:
                 self._touch_policy(key)
                 entry.last_access = time.monotonic()
                 entry.access_count += 1
+                self._protect_key_locked(key)
                 self._update_stats(load_ms=0.0, gpu_hit=True, cpu_hit=False, miss=False)
                 if key in self._pending_prefetch or key in self._prefetched_resident:
                     self._prefetch_hits += 1
@@ -316,6 +319,7 @@ class DynamicExpertCache:
             gpu_weights = self._move_entry_to_gpu_locked(key)
             self._pending_prefetch.discard(key)
             self._prefetched_resident.discard(key)
+            self._protect_key_locked(key)
             load_ms = (time.perf_counter() - start) * 1000.0
             self._update_stats(load_ms=load_ms, gpu_hit=False, cpu_hit=True, miss=False)
             self._maybe_log_info_locked()
@@ -356,6 +360,7 @@ class DynamicExpertCache:
                     self._ensure_capacity_locked()
                     self._move_entry_to_gpu_locked(key, async_transfer=True)
                     self._prefetched_resident.add(key)
+                    self._protect_key_locked(key)
                     accepted += 1
                     outcome[key] = True
             with self._stats_lock:
@@ -410,6 +415,7 @@ class DynamicExpertCache:
         self._prefetch_hits = 0
         self._pending_prefetch.clear()
         self._prefetched_resident.clear()
+        self._protected_until.clear()
 
     def save_state(self, path: str) -> None:
         """Persist CPU expert storage via safetensors + metadata JSON."""
@@ -555,6 +561,13 @@ class DynamicExpertCache:
             return None
 
         protected = self._prefetched_resident
+        now = time.monotonic()
+        expired = [key for key, ts in self._protected_until.items() if ts <= now]
+        for key in expired:
+            self._protected_until.pop(key, None)
+        protected = protected | {
+            key for key, ts in self._protected_until.items() if ts > now
+        }
 
         def _prefer_unprotected(keys: list[tuple[int, int]]) -> tuple[int, int] | None:
             for key in keys:
@@ -662,9 +675,16 @@ class DynamicExpertCache:
         self._gpu_experts.discard(key)
         self._pending_prefetch.discard(key)
         self._prefetched_resident.discard(key)
+        self._protected_until.pop(key, None)
         self._lru.pop(key, None)
         self._lfu.pop(key, None)
         self._refresh_memory_stats_locked()
+
+    def _protect_key_locked(self, key: tuple[int, int], duration_ms: float | None = None) -> None:
+        ttl_ms = self.config.resident_protection_ms if duration_ms is None else duration_ms
+        if ttl_ms <= 0.0:
+            return
+        self._protected_until[key] = time.monotonic() + (ttl_ms / 1000.0)
 
     def _update_stats(self, load_ms: float, gpu_hit: bool, cpu_hit: bool, miss: bool) -> None:
         with self._stats_lock:

@@ -346,8 +346,8 @@ class BenchmarkRunner:
         cfg = ExpertCacheConfig(
             num_experts=64,
             top_k_experts=2,
-            num_layers=4,
-            gpu_cache_size=28,
+            num_layers=6,
+            gpu_cache_size=26,
             eviction_policy="arc",
             prefetch_depth=4,
             prefetch_threshold=0.0,
@@ -359,32 +359,32 @@ class BenchmarkRunner:
                 num_layers=cfg.num_layers,
                 num_experts=cfg.num_experts,
                 top_k_experts=cfg.top_k_experts,
-                lookahead_steps=2,
+                lookahead_steps=3,
                 min_prefetch_prob=0.08,
                 prefetch_threshold=0.0,
                 uncertainty_topk_boost=1,
-                per_source_topk=1,
-                max_prefetch_per_layer=3,
-                max_pending_prefetches=256,
-                wait_timeout_ms=16.0,
+                per_source_topk=2,
+                max_prefetch_per_layer=5,
+                max_pending_prefetches=320,
+                wait_timeout_ms=24.0,
                 device=self.ctx.device,
             ),
             cache,
         )
 
         weights = {
-            "gate": torch.randn(2048, 2048),
-            "up": torch.randn(2048, 2048),
-            "down": torch.randn(2048, 2048),
+            "gate": torch.randn(1792, 1792),
+            "up": torch.randn(1792, 1792),
+            "down": torch.randn(1792, 1792),
         }
         for layer in range(cfg.num_layers):
             for expert in range(cfg.num_experts):
                 cache.register_expert(expert, layer, weights)
 
         rng = np.random.default_rng(42)
-        total_steps = 224
-        warmup_steps = 64
-        prefetch_overlap_ms = 3.0
+        total_steps = 280
+        warmup_steps = 80
+        prefetch_overlap_ms = 6.0
         trajectory: list[tuple[int, list[int]]] = []
         num_states = cfg.num_experts // 2
         phase_state = 0
@@ -392,17 +392,17 @@ class BenchmarkRunner:
             layer_id = step % cfg.num_layers
             if layer_id == 0:
                 roll = float(rng.random())
-                if roll > 0.90:
+                if roll > 0.92:
                     if roll < 0.97:
                         phase_state = (phase_state + 1) % num_states
                     else:
                         phase_state = int(rng.integers(0, num_states))
 
-            state = (phase_state + layer_id * 4) % num_states
+            state = (phase_state + layer_id * 3) % num_states
             base = (2 * state) % cfg.num_experts
             pair = [base, (base + 1) % cfg.num_experts]
 
-            if rng.random() < 0.01:
+            if rng.random() < 0.007:
                 pair[1] = (pair[1] + 2) % cfg.num_experts
 
             if pair[0] == pair[1]:

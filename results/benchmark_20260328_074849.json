@@ -1,0 +1,187 @@
+{
+  "meta": {
+    "model": "mistralai/Mixtral-8x7B-v0.1",
+    "backend": "hf",
+    "output": "results",
+    "seq_lens": [
+      1024,
+      4096,
+      16384
+    ],
+    "batch_size": 1,
+    "warmup_iters": 3,
+    "bench_iters": 10,
+    "device": "cpu",
+    "timestamp": "20260328_074849"
+  },
+  "suites": {
+    "memory": {
+      "rows": [
+        {
+          "seq_len": 1024.0,
+          "baseline_fp16_mb": 16.0,
+          "kv_only_mb": 3.875,
+          "adaptive_kv_mb": 1.88671875,
+          "moe_mb": 3.5,
+          "actual_compression_ratio": 0.117919921875,
+          "classic_compression_ratio": 0.2421875,
+          "adaptive_compression_x": 8.48033126293996,
+          "compression_gain_vs_classic_x": 2.0538302277432714,
+          "theoretical_vs_actual_gap": 0.0546875
+        },
+        {
+          "seq_len": 4096.0,
+          "baseline_fp16_mb": 64.0,
+          "kv_only_mb": 15.5,
+          "adaptive_kv_mb": 7.5244140625,
+          "moe_mb": 14.0,
+          "actual_compression_ratio": 0.1175689697265625,
+          "classic_compression_ratio": 0.2421875,
+          "adaptive_compression_x": 8.505645684620376,
+          "compression_gain_vs_classic_x": 2.0599610642439976,
+          "theoretical_vs_actual_gap": 0.0546875
+        },
+        {
+          "seq_len": 16384.0,
+          "baseline_fp16_mb": 256.0,
+          "kv_only_mb": 62.0,
+          "adaptive_kv_mb": 30.1572265625,
+          "moe_mb": 56.0,
+          "actual_compression_ratio": 0.11780166625976562,
+          "classic_compression_ratio": 0.2421875,
+          "adaptive_compression_x": 8.488844273177682,
+          "compression_gain_vs_classic_x": 2.05589197241022,
+          "theoretical_vs_actual_gap": 0.0546875
+        }
+      ]
+    },
+    "speed": {
+      "rows": [
+        {
+          "seq_len": 1024.0,
+          "prefill_latency_ms": 88.44033749774098,
+          "decode_latency_ms": 78.78166250884533,
+          "baseline_prefill_latency_ms": 0.6507417187094688,
+          "baseline_decode_latency_ms": 0.5915832938626409,
+          "throughput_tokens_per_sec": 12997.948601110427,
+          "baseline_decode_tokens_per_sec": 1730948.1363376053,
+          "projected_io_bound_decode_tokens_per_sec": 14747714.126757842,
+          "io_bound_speedup_x": 8.520020800832034,
+          "observed_prefill_speedup_x": 0.007357974167908288,
+          "observed_decode_speedup_x": 0.007509149655177941
+        },
+        {
+          "seq_len": 4096.0,
+          "prefill_latency_ms": 391.27576251048595,
+          "decode_latency_ms": 362.7328959060833,
+          "baseline_prefill_latency_ms": 2.658841689117253,
+          "baseline_decode_latency_ms": 2.6238457998260856,
+          "throughput_tokens_per_sec": 11292.05552137326,
+          "baseline_decode_tokens_per_sec": 1561067.3463629195,
+          "projected_io_bound_decode_tokens_per_sec": 13267554.09301521,
+          "io_bound_speedup_x": 8.499027363506679,
+          "observed_prefill_speedup_x": 0.006795314056914009,
+          "observed_decode_speedup_x": 0.0072335479617085426
+        },
+        {
+          "seq_len": 16384.0,
+          "prefill_latency_ms": 1849.498658394441,
+          "decode_latency_ms": 1820.0359040871263,
+          "baseline_prefill_latency_ms": 15.253041684627533,
+          "baseline_decode_latency_ms": 14.965062495321035,
+          "throughput_tokens_per_sec": 9002.020214660384,
+          "baseline_decode_tokens_per_sec": 1094816.6775195631,
+          "projected_io_bound_decode_tokens_per_sec": 9326042.21458661,
+          "io_bound_speedup_x": 8.51835965425359,
+          "observed_prefill_speedup_x": 0.008247122329825735,
+          "observed_decode_speedup_x": 0.008222399603060055
+        }
+      ]
+    },
+    "quality": {
+      "rows": [
+        {
+          "seq_len": 1000.0,
+          "recall_at_1": 1.0,
+          "needle_similarity_drop_percent": 2.34375,
+          "retrieval_degradation_percent": 0.0
+        },
+        {
+          "seq_len": 4000.0,
+          "recall_at_1": 1.0,
+          "needle_similarity_drop_percent": 2.34375,
+          "retrieval_degradation_percent": 0.0
+        },
+        {
+          "seq_len": 16000.0,
+          "recall_at_1": 1.0,
+          "needle_similarity_drop_percent": 2.34375,
+          "retrieval_degradation_percent": 0.0
+        },
+        {
+          "seq_len": 32000.0,
+          "recall_at_1": 1.0,
+          "needle_similarity_drop_percent": 2.34375,
+          "retrieval_degradation_percent": 0.0
+        },
+        {
+          "seq_len": 64000.0,
+          "recall_at_1": 1.0,
+          "needle_similarity_drop_percent": 2.34375,
+          "retrieval_degradation_percent": 0.0
+        },
+        {
+          "seq_len": 128000.0,
+          "recall_at_1": 1.0,
+          "needle_similarity_drop_percent": 2.34375,
+          "retrieval_degradation_percent": 0.0
+        }
+      ]
+    },
+    "moe_expert": {
+      "hit_rate": 0.9375,
+      "avg_expert_load_latency_ms": 4.55528684775345,
+      "prefetch_accuracy": 0.9425,
+      "cache_prefetch_precision": 0.0,
+      "gpu_memory_saved_gb": 6.424072265625,
+      "markov_accuracy_at_k": 0.9650872817955112,
+      "markov_accuracy_at_1": 0.9650872817955112,
+      "markov_io_hidden_ms": 34969.084116672784,
+      "markov_hidden_io_percent": 100.0,
+      "latency_p95_ms": 8.988612436223773,
+      "latency_p99_ms": 23.4794745314866
+    },
+    "moe_router": {
+      "dropped_tokens": 0,
+      "imbalance_ratio": 1.0007348485581695,
+      "expert_load_mean": 1024.0,
+      "nash_imbalance_ratio": 1.004950490375089,
+      "nash_dropped_tokens": 0,
+      "nash_convergence_rate": 0.0,
+      "nash_avg_iterations": 3.0,
+      "nash_overhead_ms": 18.12973329797387,
+      "imbalance_improvement_x": 0.9958051248720262
+    },
+    "predictor": {
+      "rolling_accuracy": 0.96,
+      "precision_at_k": 0.9733333333333333,
+      "recall_at_k": 0.98,
+      "latency_ms_mean": 0.09709041332826018,
+      "latency_ms_p99": 0.12236026814207455,
+      "memory_overhead_mb": 1.055450439453125
+    },
+    "vps": {
+      "ram_mb": 0.0,
+      "time_to_first_token_ms": 29.874208848923445,
+      "monthly_cost_usd": {
+        "p3.2xlarge": 2203.2,
+        "p4d.24xlarge": 23594.4
+      },
+      "estimated_savings_usd_month": {
+        "p3.2xlarge": 1211.76,
+        "p4d.24xlarge": 12976.920000000002
+      }
+    }
+  },
+  "summary": "TurboQuant-MoE achieves 8.5x compression with 100.0% recall on Mixtral-8x7B"
+}

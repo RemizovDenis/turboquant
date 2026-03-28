@@ -101,8 +101,10 @@ class ExpertPredictor(nn.Module):
 
         features = [hidden_feat, hist_feat]
         if self.layer_embed is not None:
-            layer_tensor = torch.tensor(layer_id, device=hidden_states.device, dtype=torch.long)
-            features.append(self.layer_embed.forward(layer_tensor))
+            layer_idx = int(layer_id)
+            if layer_idx < 0 or layer_idx >= self.config.num_layers:
+                raise ValueError("layer_id out of range")
+            features.append(self.layer_embed.weight[layer_idx])
 
         combined = torch.cat(features, dim=-1)
         logits = self.output.forward(self.act.forward(self.combiner.forward(combined)))
@@ -117,7 +119,7 @@ class ExpertPredictor(nn.Module):
     ) -> list[int]:
         """Predict expert ids expected to be activated by router."""
         thr = self.config.prediction_threshold if threshold is None else threshold
-        with torch.no_grad():
+        with torch.inference_mode():
             probs = self.forward(hidden_states, layer_id)
             chosen = cast(list[int], torch.nonzero(probs > thr, as_tuple=False).flatten().tolist())
             if not chosen:
@@ -263,8 +265,10 @@ class ExpertPredictor(nn.Module):
 
         features = [hidden_feat, hist_feat]
         if self.layer_embed is not None:
-            layer_tensor = torch.tensor(layer_id, device=hidden_states.device, dtype=torch.long)
-            features.append(self.layer_embed.forward(layer_tensor))
+            layer_idx = int(layer_id)
+            if layer_idx < 0 or layer_idx >= self.config.num_layers:
+                raise ValueError("layer_id out of range")
+            features.append(self.layer_embed.weight[layer_idx])
 
         combined = torch.cat(features, dim=-1)
         return self.output.forward(self.act.forward(self.combiner.forward(combined)))
@@ -285,6 +289,5 @@ class ExpertPredictor(nn.Module):
                 if not experts:
                     continue
                 row = offset + idx
-                ex_idx = torch.tensor(experts, dtype=torch.long, device=self.device_obj)
-                vec[row].scatter_(0, ex_idx, 1.0)
+                vec[row, experts] = 1.0
         return vec.reshape(-1)

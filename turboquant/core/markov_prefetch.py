@@ -260,6 +260,7 @@ class MarkovTrajectoryPredictor(nn.Module):
 
         layer_scores: dict[int, dict[int, float]] = defaultdict(dict)
         layer_preds: dict[int, list[PrefetchPrediction]] = defaultdict(list)
+        layer_horizons: dict[int, dict[int, int]] = defaultdict(dict)
         for layer_id, pred in predictions.items():
             if not pred.expert_ids:
                 continue
@@ -283,6 +284,8 @@ class MarkovTrajectoryPredictor(nn.Module):
                 prev = layer_scores[layer_id].get(int(expert_id), 0.0)
                 if score >= prev:
                     layer_scores[layer_id][int(expert_id)] = score
+                horizon_prev = layer_horizons[layer_id].get(int(expert_id), pred.horizon)
+                layer_horizons[layer_id][int(expert_id)] = min(horizon_prev, pred.horizon)
 
         if not layer_scores:
             return
@@ -298,33 +301,44 @@ class MarkovTrajectoryPredictor(nn.Module):
             if budget <= 0:
                 return
 
-            for layer_id in sorted(layer_scores):
-                ranked = sorted(
-                    layer_scores[layer_id].items(),
-                    key=lambda item: item[1],
-                    reverse=True,
-                )
-                ready_set: set[int] = set()
-                selected: list[int] = []
-                top_score = 0.0
-                for expert_id, score in ranked:
+            layer_ready: dict[int, set[int]] = defaultdict(set)
+            layer_selected: dict[int, list[int]] = defaultdict(list)
+            ranked_global: list[tuple[float, int, int, int]] = []
+
+            for layer_id, scores in layer_scores.items():
+                for expert_id, score in scores.items():
                     key = (layer_id, expert_id)
                     if key in self.expert_cache._gpu_experts:
-                        ready_set.add(expert_id)
-                        if len(ready_set) >= per_layer_limit:
-                            break
+                        layer_ready[layer_id].add(expert_id)
                         continue
                     if key in self.pending_prefetches:
                         continue
-                    selected.append(expert_id)
-                    top_score = max(top_score, score)
-                    if len(selected) >= per_layer_limit or len(selected) >= budget:
-                        break
+                    horizon = layer_horizons[layer_id].get(expert_id, self.config.lookahead_steps)
+                    ranked_global.append((float(score), -int(horizon), layer_id, expert_id))
 
+            ranked_global.sort(key=lambda item: (item[0], item[1]), reverse=True)
+
+            for score, _, layer_id, expert_id in ranked_global:
+                if budget <= 0:
+                    break
+                if len(layer_selected[layer_id]) >= per_layer_limit:
+                    continue
+                key = (layer_id, expert_id)
+                if key in self.pending_prefetches or key in self.expert_cache._gpu_experts:
+                    continue
+                if score <= 0.0:
+                    continue
+                layer_selected[layer_id].append(expert_id)
+                budget -= 1
+
+            for layer_id in sorted(layer_scores):
+                selected = layer_selected.get(layer_id, [])
+                ready_set = layer_ready.get(layer_id, set())
                 if not selected and not ready_set:
                     continue
 
                 if selected:
+                    top_score = max(layer_scores[layer_id].get(expert_id, 0.0) for expert_id in selected)
                     fut = self.expert_cache.prefetch_experts(
                         expert_ids=selected,
                         layer_id=layer_id,
@@ -332,13 +346,11 @@ class MarkovTrajectoryPredictor(nn.Module):
                     )
                     for expert_id in selected:
                         self.pending_prefetches[(layer_id, expert_id)] = fut
-                for pred in layer_preds[layer_id]:
-                    if set(pred.expert_ids) & (set(selected) | ready_set):
-                        pred.prefetch_started = True
 
-                budget -= len(selected)
-                if budget <= 0:
-                    return
+                selected_set = set(selected)
+                for pred in layer_preds[layer_id]:
+                    if set(pred.expert_ids) & (selected_set | ready_set):
+                        pred.prefetch_started = True
 
     def on_layer_complete(self, layer_id: int, actual_experts: list[int]) -> None:
         """Update transitions and prediction accuracy when a layer completes.
