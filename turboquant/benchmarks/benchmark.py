@@ -422,7 +422,9 @@ class BenchmarkRunner:
             markov_ready = set(
                 markov.wait_for_layer(layer_id=layer_id, timeout_ms=markov.config.wait_timeout_ms)
             )
-            resident = {expert_id for expert_id in active if (layer_id, expert_id) in cache._gpu_experts}
+            resident = {
+                expert_id for expert_id in active if (layer_id, expert_id) in cache._gpu_experts
+            }
             ready_hits += len((resident | markov_ready) & set(active))
             total_active += len(active)
 
@@ -439,8 +441,8 @@ class BenchmarkRunner:
 
         stats = cache.stats()
         markov_stats = markov.stats()
-        hidden_io_percent = 100.0 * markov_stats.io_latency_hidden_ms / max(
-            1e-8, float(np.sum(latencies))
+        hidden_io_percent = (
+            100.0 * markov_stats.io_latency_hidden_ms / max(1e-8, float(np.sum(latencies)))
         )
         hidden_io_percent = min(100.0, hidden_io_percent)
         prefetch_readiness = ready_hits / max(1, total_active)
@@ -583,7 +585,9 @@ class BenchmarkRunner:
                 {
                     "seq_len": float(seq),
                     "recall_at_1": float(np.mean(recalls)),
-                    "needle_similarity_drop_percent": float(np.mean(needle_similarity_drops) * 100.0),
+                    "needle_similarity_drop_percent": float(
+                        np.mean(needle_similarity_drops) * 100.0
+                    ),
                     "retrieval_degradation_percent": float((1.0 - np.mean(recalls)) * 100.0),
                 }
             )

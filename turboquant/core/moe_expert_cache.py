@@ -565,9 +565,7 @@ class DynamicExpertCache:
         expired = [key for key, ts in self._protected_until.items() if ts <= now]
         for key in expired:
             self._protected_until.pop(key, None)
-        protected = protected | {
-            key for key, ts in self._protected_until.items() if ts > now
-        }
+        protected = protected | {key for key, ts in self._protected_until.items() if ts > now}
 
         def _prefer_unprotected(keys: list[tuple[int, int]]) -> tuple[int, int] | None:
             for key in keys:

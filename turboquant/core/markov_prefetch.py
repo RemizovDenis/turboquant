@@ -338,7 +338,9 @@ class MarkovTrajectoryPredictor(nn.Module):
                     continue
 
                 if selected:
-                    top_score = max(layer_scores[layer_id].get(expert_id, 0.0) for expert_id in selected)
+                    top_score = max(
+                        layer_scores[layer_id].get(expert_id, 0.0) for expert_id in selected
+                    )
                     fut = self.expert_cache.prefetch_experts(
                         expert_ids=selected,
                         layer_id=layer_id,
