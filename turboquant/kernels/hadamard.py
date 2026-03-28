@@ -124,9 +124,7 @@ class HadamardCache:
         self._max = max_cache_size
         self._cache: dict[tuple[int, int, str], torch.Tensor] = {}
 
-    def get_sign_vector(
-        self, head_dim: int, seed: int, device: torch.device
-    ) -> torch.Tensor:
+    def get_sign_vector(self, head_dim: int, seed: int, device: torch.device) -> torch.Tensor:
         """Return a cached ±1 sign vector for the given parameters.
 
         Args:
@@ -160,9 +158,7 @@ _hadamard_cache = HadamardCache()
 
 
 @lru_cache(maxsize=64)
-def _get_cached_sign_vector(
-    head_dim: int, seed: int, device_str: str
-) -> torch.Tensor:
+def _get_cached_sign_vector(head_dim: int, seed: int, device_str: str) -> torch.Tensor:
     """LRU-cached sign vector retrieval.
 
     Args:
@@ -173,9 +169,7 @@ def _get_cached_sign_vector(
     Returns:
         Sign vector on the correct device.
     """
-    return _hadamard_cache.get_sign_vector(
-        head_dim, seed, torch.device(device_str)
-    )
+    return _hadamard_cache.get_sign_vector(head_dim, seed, torch.device(device_str))
 
 
 # ======================================================================

@@ -50,7 +50,11 @@ class TurboQuantMoEConfig:
         model_type = str(getattr(model_config, "model_type", "auto")).lower()
         hidden_size = int(getattr(model_config, "hidden_size", 4096))
         num_heads = int(
-            getattr(model_config, "num_attention_heads", getattr(model_config, "num_key_value_heads", 32))
+            getattr(
+                model_config,
+                "num_attention_heads",
+                getattr(model_config, "num_key_value_heads", 32),
+            )
         )
         head_dim = int(getattr(model_config, "head_dim", max(1, hidden_size // max(1, num_heads))))
 
@@ -158,10 +162,7 @@ class TurboQuantMoE:
         self.router = MoERouterOptimizer(config.router_config)
 
         self.predictor: ExpertPredictor | None = None
-        if (
-            config.enable_expert_prediction
-            and config.predictor_config is not None
-        ):
+        if config.enable_expert_prediction and config.predictor_config is not None:
             self.predictor = ExpertPredictor(config.predictor_config)
 
         self._patched_forwards: dict[int, Any] = {}
@@ -202,7 +203,9 @@ class TurboQuantMoE:
                     head_dim = self.config.kv_config.head_dim
                     heads = self.config.kv_config.num_heads
                     device = hidden_states.device
-                    keys = torch.zeros((batch, heads, seq, head_dim), dtype=torch.float16, device=device)
+                    keys = torch.zeros(
+                        (batch, heads, seq, head_dim), dtype=torch.float16, device=device
+                    )
                     values = torch.zeros_like(keys)
                     self.step(__layer_id, hidden_states, router_logits, keys, values)
                     return __orig(hidden_states, *args, **kwargs)
@@ -270,7 +273,9 @@ class TurboQuantMoE:
 
             latency_ms = (time.perf_counter() - t_start) * 1000.0
             after = self.memory_report().total_saved_mb
-            prediction_ok = set(predicted_experts) >= set(active_experts) if predicted_experts else False
+            prediction_ok = (
+                set(predicted_experts) >= set(active_experts) if predicted_experts else False
+            )
 
             self._step_counter += 1
             if self.config.profile_mode:
@@ -316,7 +321,9 @@ class TurboQuantMoE:
         expert_used = ex_stats.gpu_memory_used_mb + ex_stats.cpu_memory_used_mb
         expert_ratio = expert_used / max(1e-8, expert_baseline)
 
-        total_saved = (kv_mem["fp16_baseline_mb"] - kv_mem["total_mb"]) + ex_stats.gpu_memory_saved_mb
+        total_saved = (
+            kv_mem["fp16_baseline_mb"] - kv_mem["total_mb"]
+        ) + ex_stats.gpu_memory_saved_mb
         total_baseline = kv_mem["fp16_baseline_mb"] + expert_baseline
 
         return MemoryReport(
@@ -398,7 +405,9 @@ class TurboQuantMoE:
             "kv_config": _to_json_dict(self.config.kv_config),
             "expert_config": _to_json_dict(self.config.expert_config),
             "router_config": _to_json_dict(self.config.router_config),
-            "predictor_config": _to_json_dict(self.config.predictor_config) if self.config.predictor_config else None,
+            "predictor_config": _to_json_dict(self.config.predictor_config)
+            if self.config.predictor_config
+            else None,
             "model_type": self.config.model_type,
             "enable_kv_quant": self.config.enable_kv_quant,
             "enable_expert_cache": self.config.enable_expert_cache,
@@ -491,15 +500,21 @@ class TurboQuantMoE:
         for expert_id, expert in enumerate(experts):
             if not isinstance(expert, nn.Module):
                 continue
-            weights = {name: p.detach() for name, p in expert.state_dict().items() if p.is_floating_point()}
+            weights = {
+                name: p.detach() for name, p in expert.state_dict().items() if p.is_floating_point()
+            }
             if not weights:
                 continue
             try:
-                self.expert_cache.register_expert(expert_id=expert_id, layer_id=layer_id, weights=weights)
+                self.expert_cache.register_expert(
+                    expert_id=expert_id, layer_id=layer_id, weights=weights
+                )
             except ValueError:
                 continue
 
-    def _extract_router_logits(self, module: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor | None:
+    def _extract_router_logits(
+        self, module: nn.Module, hidden_states: torch.Tensor
+    ) -> torch.Tensor | None:
         gate = getattr(module, "gate", None)
         if isinstance(gate, nn.Module):
             flat = hidden_states.reshape(-1, hidden_states.shape[-1])

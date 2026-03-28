@@ -135,7 +135,9 @@ class InMemoryTurboQuant(TurboQuantVectorAdapter):
 
         out: list[SearchResult] = []
         for i in top_idx.tolist():
-            out.append(SearchResult(id=self._ids[i], score=float(sims[i]), payload=self._payloads[i]))
+            out.append(
+                SearchResult(id=self._ids[i], score=float(sims[i]), payload=self._payloads[i])
+            )
         return out
 
     def search_async(self, query: np.ndarray, top_k: int) -> Awaitable[list[SearchResult]]:

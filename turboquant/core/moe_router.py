@@ -81,7 +81,9 @@ class MoERouterOptimizer(nn.Module):
         if self.config.normalize_expert_weights:
             topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True).clamp_min(1e-8)
 
-        ste_weights = topk_weights + (topk_weights.detach() * 0 + topk_weights) - topk_weights.detach()
+        ste_weights = (
+            topk_weights + (topk_weights.detach() * 0 + topk_weights) - topk_weights.detach()
+        )
         dispatch_mask, ste_weights, dropped_tokens = self._apply_capacity(
             expert_indices=topk_indices,
             expert_weights=ste_weights,
@@ -103,7 +105,9 @@ class MoERouterOptimizer(nn.Module):
         with torch.no_grad():
             ema_load.mul_(self.config.ema_decay).add_(current_load * (1.0 - self.config.ema_decay))
 
-        imbalance_ratio = float(expert_load.max().item() / expert_load.mean().clamp_min(1e-8).item())
+        imbalance_ratio = float(
+            expert_load.max().item() / expert_load.mean().clamp_min(1e-8).item()
+        )
         self._logger.debug(
             "router_forward",
             dropped_tokens=dropped_tokens,
@@ -121,7 +125,9 @@ class MoERouterOptimizer(nn.Module):
             dropped_tokens=dropped_tokens,
         )
 
-    def compute_aux_loss(self, router_probs: torch.Tensor, dispatch_mask: torch.Tensor) -> torch.Tensor:
+    def compute_aux_loss(
+        self, router_probs: torch.Tensor, dispatch_mask: torch.Tensor
+    ) -> torch.Tensor:
         """Switch Transformer auxiliary load balancing loss."""
         tokens = max(1, dispatch_mask.shape[0])
         f_i = dispatch_mask.float().sum(dim=0) / tokens
@@ -133,7 +139,9 @@ class MoERouterOptimizer(nn.Module):
         z = torch.logsumexp(router_logits.float(), dim=-1)
         return self.config.z_loss_coeff * torch.mean(z.square())
 
-    def prune_router_weights(self, probs: torch.Tensor, threshold: float | None = None) -> torch.Tensor:
+    def prune_router_weights(
+        self, probs: torch.Tensor, threshold: float | None = None
+    ) -> torch.Tensor:
         """Zero out small routing probabilities and renormalize rows."""
         thr = self.config.pruning_threshold if threshold is None else threshold
         if thr <= 0:
@@ -187,11 +195,20 @@ class MoERouterOptimizer(nn.Module):
         num_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
         """Apply per-expert capacity and drop low-score overflow assignments."""
-        capacity = int(math.ceil(self.config.top_k * num_tokens / self.config.num_experts * self.config.capacity_factor))
+        capacity = int(
+            math.ceil(
+                self.config.top_k
+                * num_tokens
+                / self.config.num_experts
+                * self.config.capacity_factor
+            )
+        )
         capacity = max(1, capacity)
 
         mask = torch.ones_like(expert_weights, dtype=torch.bool)
-        kept_per_expert = torch.zeros((self.config.num_experts,), dtype=torch.int32, device=expert_indices.device)
+        kept_per_expert = torch.zeros(
+            (self.config.num_experts,), dtype=torch.int32, device=expert_indices.device
+        )
 
         flat_scores = expert_weights.reshape(-1)
         flat_experts = expert_indices.reshape(-1)

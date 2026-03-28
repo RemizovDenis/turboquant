@@ -111,7 +111,9 @@ class QJLResidualCorrector(nn.Module):
     @staticmethod
     def _unpack_bits(packed: torch.Tensor, n_bits: int) -> torch.Tensor:
         bytes_ = packed.to(torch.uint8)
-        powers = torch.tensor([128, 64, 32, 16, 8, 4, 2, 1], device=bytes_.device, dtype=torch.uint8)
+        powers = torch.tensor(
+            [128, 64, 32, 16, 8, 4, 2, 1], device=bytes_.device, dtype=torch.uint8
+        )
         unpacked = ((bytes_.unsqueeze(-1) & powers) > 0).to(torch.float32)
         unpacked = unpacked.reshape(*packed.shape[:-1], -1)
         return unpacked.narrow(-1, 0, n_bits)
@@ -120,7 +122,9 @@ class QJLResidualCorrector(nn.Module):
         """Encode residual into packed 1-bit sketch representation."""
         if residual.numel() == 0:
             out_bytes = math.ceil(self.sketch_dim / 8)
-            return torch.empty(*residual.shape[:-1], out_bytes, dtype=torch.uint8, device=residual.device)
+            return torch.empty(
+                *residual.shape[:-1], out_bytes, dtype=torch.uint8, device=residual.device
+            )
 
         if residual.shape[-1] != self.head_dim:
             raise ValueError(f"Expected last dim {self.head_dim}, got {residual.shape[-1]}")

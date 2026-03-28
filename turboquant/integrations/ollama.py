@@ -203,7 +203,9 @@ def load_proxy_from_env() -> OllamaTurboQuantProxy:
     gpu_cache = int(os.getenv("TQ_GPU_CACHE_EXPERTS", "4"))
 
     cfg = TurboQuantMoEConfig.from_pretrained_config(
-        type("Cfg", (), {"hidden_size": 4096, "num_attention_heads": 32, "model_type": "mixtral"})(),
+        type(
+            "Cfg", (), {"hidden_size": 4096, "num_attention_heads": 32, "model_type": "mixtral"}
+        )(),
         bits=bits,
         gpu_cache_size=gpu_cache,
     )

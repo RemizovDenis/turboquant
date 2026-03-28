@@ -103,7 +103,9 @@ class BenchmarkRunner:
         kv_only = TurboQuantKVCache(cfg)
 
         moe_cfg = TurboQuantMoEConfig.from_pretrained_config(
-            type("Cfg", (), {"hidden_size": 4096, "num_attention_heads": 32, "model_type": "mixtral"})(),
+            type(
+                "Cfg", (), {"hidden_size": 4096, "num_attention_heads": 32, "model_type": "mixtral"}
+            )(),
             bits=3,
             gpu_cache_size=4,
         )
@@ -132,7 +134,11 @@ class BenchmarkRunner:
             moe_out = moe.step(
                 layer_id=0,
                 hidden_states=torch.randn(self.ctx.batch_size, seq, 4096, device=self.ctx.device),
-                router_logits=torch.randn(self.ctx.batch_size * seq, moe_cfg.router_config.num_experts, device=self.ctx.device),
+                router_logits=torch.randn(
+                    self.ctx.batch_size * seq,
+                    moe_cfg.router_config.num_experts,
+                    device=self.ctx.device,
+                ),
                 keys=k,
                 values=v,
             )
@@ -153,7 +159,9 @@ class BenchmarkRunner:
     def triton_benchmark(self) -> dict[str, Any]:
         if self.ctx.device != "cuda":
             return {"warning": "CUDA unavailable; triton benchmark skipped"}
-        return benchmark_triton_kernels(seq_lens=self.ctx.seq_lens, head_dim=128, batch_size=self.ctx.batch_size)
+        return benchmark_triton_kernels(
+            seq_lens=self.ctx.seq_lens, head_dim=128, batch_size=self.ctx.batch_size
+        )
 
     def speed_benchmark(self) -> dict[str, Any]:
         cfg = TurboQuantConfig(head_dim=128, num_heads=32, bits=3, device=self.ctx.device)
@@ -213,7 +221,10 @@ class BenchmarkRunner:
         latencies = []
         for _ in tqdm(range(50), desc="moe_expert"):
             t0 = time.perf_counter()
-            cache.get_expert(expert_id=np.random.randint(0, cfg.num_experts), layer_id=np.random.randint(0, cfg.num_layers))
+            cache.get_expert(
+                expert_id=np.random.randint(0, cfg.num_experts),
+                layer_id=np.random.randint(0, cfg.num_layers),
+            )
             latencies.append((time.perf_counter() - t0) * 1000)
 
         stats = cache.stats()
@@ -237,7 +248,9 @@ class BenchmarkRunner:
         }
 
     def predictor_benchmark(self) -> dict[str, Any]:
-        cfg = ExpertPredictorConfig(hidden_dim=4096, num_experts=8, num_layers=32, device=self.ctx.device)
+        cfg = ExpertPredictorConfig(
+            hidden_dim=4096, num_experts=8, num_layers=32, device=self.ctx.device
+        )
         predictor = ExpertPredictor(cfg).to(self.ctx.device)
 
         hidden = torch.randn(1, 64, 4096, device=self.ctx.device)
@@ -325,7 +338,12 @@ class BenchmarkRunner:
         if not mem_rows:
             return
         df = pd.DataFrame(mem_rows)
-        fig = px.line(df, x="seq_len", y=["baseline_fp16_mb", "kv_only_mb", "moe_mb"], title="Memory Benchmark")
+        fig = px.line(
+            df,
+            x="seq_len",
+            y=["baseline_fp16_mb", "kv_only_mb", "moe_mb"],
+            title="Memory Benchmark",
+        )
         fig.write_html(self.html_path)
 
     def _summary_line(self) -> str:

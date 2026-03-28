@@ -58,9 +58,7 @@ class ExpertPredictor(nn.Module):
         }
         self._state_lock = threading.RLock()
 
-        self.online_optimizer = torch.optim.SGD(
-            self.parameters(), lr=config.online_learning_rate
-        )
+        self.online_optimizer = torch.optim.SGD(self.parameters(), lr=config.online_learning_rate)
 
         self.prediction_accuracy: deque[float] = deque(maxlen=1000)
         self.precision_history: deque[float] = deque(maxlen=1000)
@@ -174,7 +172,11 @@ class ExpertPredictor(nn.Module):
 
         logits = self._forward_logits(hidden_states, layer_id)
         probs = torch.sigmoid(logits)
-        predicted = set(torch.nonzero(probs > self.config.prediction_threshold, as_tuple=False).flatten().tolist())
+        predicted = set(
+            torch.nonzero(probs > self.config.prediction_threshold, as_tuple=False)
+            .flatten()
+            .tolist()
+        )
         actual_set = set(actual_experts)
         reward = 1.0 if predicted == actual_set else 0.0
 

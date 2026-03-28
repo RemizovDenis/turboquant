@@ -153,7 +153,11 @@ class TurboQuantKVCache:
                 entry = self._compress_impl(keys.cpu(), values.cpu())
 
             mem = self.memory_usage(entry)
-            log.info("compress", compression_ratio=mem["compression_ratio"], savings_percent=mem["actual_savings_percent"])
+            log.info(
+                "compress",
+                compression_ratio=mem["compression_ratio"],
+                savings_percent=mem["actual_savings_percent"],
+            )
             if mem["total_mb"] > self.config.cpu_offload_threshold_mb:
                 entry = self._cpu_offload(entry)
             return entry
@@ -195,24 +199,36 @@ class TurboQuantKVCache:
             entry.access_count += 1
             shape = tuple(int(v) for v in entry.metadata["original_shape"])
             k = self.quantizer.dequantize(entry.compressed_keys[0], entry.compressed_keys[1], shape)
-            v = self.quantizer.dequantize(entry.compressed_values[0], entry.compressed_values[1], shape)
+            v = self.quantizer.dequantize(
+                entry.compressed_values[0], entry.compressed_values[1], shape
+            )
 
-            if self.corrector is not None and entry.residual_keys is not None and entry.residual_values is not None:
+            if (
+                self.corrector is not None
+                and entry.residual_keys is not None
+                and entry.residual_values is not None
+            ):
                 k_corr = self.corrector.decode(
                     entry.residual_keys,
                     shape,
-                    scale=float(entry.residual_scales_k.mean().item()) if entry.residual_scales_k is not None else 1.0,
+                    scale=float(entry.residual_scales_k.mean().item())
+                    if entry.residual_scales_k is not None
+                    else 1.0,
                 )
                 v_corr = self.corrector.decode(
                     entry.residual_values,
                     shape,
-                    scale=float(entry.residual_scales_v.mean().item()) if entry.residual_scales_v is not None else 1.0,
+                    scale=float(entry.residual_scales_v.mean().item())
+                    if entry.residual_scales_v is not None
+                    else 1.0,
                 )
                 k = (k.float() + k_corr.float()).to(torch.float16)
                 v = (v.float() + v_corr.float()).to(torch.float16)
             return k, v
 
-    def update(self, entry: CacheEntry, new_keys: torch.Tensor, new_values: torch.Tensor) -> CacheEntry:
+    def update(
+        self, entry: CacheEntry, new_keys: torch.Tensor, new_values: torch.Tensor
+    ) -> CacheEntry:
         """Append new tokens (sliding-window constrained by max_seq_len)."""
         with self._lock:
             keys, values = self.decompress(entry)
@@ -273,7 +289,9 @@ class TurboQuantKVCache:
 
         rows: list[dict[str, float]] = []
         for sl in seq_lengths:
-            xk = torch.randn(batch_size, heads, sl, self.config.head_dim, dtype=torch.float16, device=self.device)
+            xk = torch.randn(
+                batch_size, heads, sl, self.config.head_dim, dtype=torch.float16, device=self.device
+            )
             xv = torch.randn_like(xk)
             t0 = time.perf_counter()
             entry = self.compress(xk, xv)
@@ -283,7 +301,13 @@ class TurboQuantKVCache:
             dk, dv = self.decompress(entry)
             decompress_ms = (time.perf_counter() - t0) * 1000.0
 
-            mse = float(((xk.float() - dk.float()) ** 2).mean().item() + ((xv.float() - dv.float()) ** 2).mean().item()) / 2.0
+            mse = (
+                float(
+                    ((xk.float() - dk.float()) ** 2).mean().item()
+                    + ((xv.float() - dv.float()) ** 2).mean().item()
+                )
+                / 2.0
+            )
             mem = self.memory_usage(entry)
 
             rows.append(
@@ -308,7 +332,9 @@ class TurboQuantKVCache:
                 super().__init__()
                 self.cache = cache
 
-            def forward(self, k: torch.Tensor, v: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            def forward(
+                self, k: torch.Tensor, v: torch.Tensor
+            ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
                 k_p, k_s = self.cache.quantizer(k)
                 v_p, v_s = self.cache.quantizer(v)
                 return k_p, k_s, v_p, v_s
@@ -319,7 +345,9 @@ class TurboQuantKVCache:
                 self.cache = cache
                 self.shape = shape
 
-            def forward(self, k_p: torch.Tensor, k_s: torch.Tensor, v_p: torch.Tensor, v_s: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            def forward(
+                self, k_p: torch.Tensor, k_s: torch.Tensor, v_p: torch.Tensor, v_s: torch.Tensor
+            ) -> tuple[torch.Tensor, torch.Tensor]:
                 dk = self.cache.quantizer.dequantize(k_p, k_s, self.shape)
                 dv = self.cache.quantizer.dequantize(v_p, v_s, self.shape)
                 return dk, dv
@@ -329,12 +357,19 @@ class TurboQuantKVCache:
         v = torch.randn(shape, dtype=torch.float16, device=self.device)
 
         comp = CompressModule(self).to(self.device)
-        torch.onnx.export(comp, (k, v), str(p.with_name(p.stem + "_compress.onnx")), opset_version=17)
+        torch.onnx.export(
+            comp, (k, v), str(p.with_name(p.stem + "_compress.onnx")), opset_version=17
+        )
 
         k_p, k_s = self.quantizer(k)
         v_p, v_s = self.quantizer(v)
         decomp = DecompressModule(self, shape).to(self.device)
-        torch.onnx.export(decomp, (k_p, k_s, v_p, v_s), str(p.with_name(p.stem + "_decompress.onnx")), opset_version=17)
+        torch.onnx.export(
+            decomp,
+            (k_p, k_s, v_p, v_s),
+            str(p.with_name(p.stem + "_decompress.onnx")),
+            opset_version=17,
+        )
 
     def _cpu_offload(self, entry: CacheEntry) -> CacheEntry:
         """Move all cache tensors to CPU."""

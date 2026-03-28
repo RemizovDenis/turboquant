@@ -112,14 +112,20 @@ class ARCCache:
     def adapt(self, key: tuple[int, int], ghost_hit: Literal["b1", "b2"]) -> None:
         """Adapt recency/frequency target after ghost-list hit."""
         if ghost_hit == "b1":
-            delta = 1 if len(self.b1) >= len(self.b2) else max(1, len(self.b2) // max(1, len(self.b1)))
+            delta = (
+                1 if len(self.b1) >= len(self.b2) else max(1, len(self.b2) // max(1, len(self.b1)))
+            )
             self.target_t1 = min(self.capacity, self.target_t1 + delta)
         else:
-            delta = 1 if len(self.b2) >= len(self.b1) else max(1, len(self.b1) // max(1, len(self.b2)))
+            delta = (
+                1 if len(self.b2) >= len(self.b1) else max(1, len(self.b1) // max(1, len(self.b2)))
+            )
             self.target_t1 = max(0, self.target_t1 - delta)
 
     def _replace(self, key: tuple[int, int]) -> tuple[int, int] | None:
-        if self.t1 and (len(self.t1) > self.target_t1 or (key in self.b2 and len(self.t1) == self.target_t1)):
+        if self.t1 and (
+            len(self.t1) > self.target_t1 or (key in self.b2 and len(self.t1) == self.target_t1)
+        ):
             old, _ = self.t1.popitem(last=False)
             self.b1[old] = None
             return old
@@ -225,7 +231,9 @@ class DynamicExpertCache:
         self._experts: dict[tuple[int, int], ExpertEntry] = {}
         self._gpu_experts: set[tuple[int, int]] = set()
         self._pending_prefetch: set[tuple[int, int]] = set()
-        self._prefetch_queue: deque[tuple[int, int]] = deque(maxlen=max(1, config.prefetch_depth * config.num_layers))
+        self._prefetch_queue: deque[tuple[int, int]] = deque(
+            maxlen=max(1, config.prefetch_depth * config.num_layers)
+        )
 
         self._policy = config.eviction_policy.lower()
         self._arc = ARCCache(config.gpu_cache_size)
@@ -235,7 +243,9 @@ class DynamicExpertCache:
         self._streams: list[torch.cuda.Stream] = []
         if torch.cuda.is_available() and self.device.type == "cuda":
             cuda_mod: Any = torch.cuda
-            self._streams = [cuda_mod.Stream(device=self.device) for _ in range(max(1, config.transfer_streams))]
+            self._streams = [
+                cuda_mod.Stream(device=self.device) for _ in range(max(1, config.transfer_streams))
+            ]
 
         self._stats = ExpertCacheStats()
         self._stream_index = 0
@@ -244,7 +254,9 @@ class DynamicExpertCache:
         self._prefetch_hits = 0
         self._logger = LOGGER.bind(component="DynamicExpertCache")
 
-    def register_expert(self, expert_id: int, layer_id: int, weights: dict[str, torch.Tensor]) -> None:
+    def register_expert(
+        self, expert_id: int, layer_id: int, weights: dict[str, torch.Tensor]
+    ) -> None:
         """Register a new expert; stored initially on CPU tier."""
         key = (layer_id, expert_id)
         with self._lock:
@@ -255,7 +267,9 @@ class DynamicExpertCache:
             compressed = bool(self.config.compress_cpu_experts)
             stored = self._compress_weights(cpu_weights) if compressed else cpu_weights
 
-            gpu_mem_mb = self._weights_size_mb({k: v.to(dtype=torch.float16) for k, v in cpu_weights.items()})
+            gpu_mem_mb = self._weights_size_mb(
+                {k: v.to(dtype=torch.float16) for k, v in cpu_weights.items()}
+            )
             cpu_mem_mb = self._weights_size_mb(stored)
             entry = ExpertEntry(
                 expert_id=expert_id,
@@ -324,7 +338,10 @@ class DynamicExpertCache:
                     if key in self._gpu_experts:
                         outcome[key] = True
                         continue
-                    if len(self._gpu_experts) >= self.config.gpu_cache_size and priority < self.config.prefetch_threshold:
+                    if (
+                        len(self._gpu_experts) >= self.config.gpu_cache_size
+                        and priority < self.config.prefetch_threshold
+                    ):
                         outcome[key] = False
                         continue
                     self._pending_prefetch.add(key)
@@ -551,7 +568,9 @@ class DynamicExpertCache:
         self._stream_index += 1
         return stream
 
-    def _move_entry_to_gpu_locked(self, key: tuple[int, int], async_transfer: bool = False) -> dict[str, torch.Tensor]:
+    def _move_entry_to_gpu_locked(
+        self, key: tuple[int, int], async_transfer: bool = False
+    ) -> dict[str, torch.Tensor]:
         entry = self._experts[key]
         weights_cpu = self._decompress_weights(entry)
         stream = self._next_stream()
@@ -567,7 +586,9 @@ class DynamicExpertCache:
                 if not async_transfer:
                     stream.synchronize()
             else:
-                weights_gpu = {n: t.to(self.device, dtype=torch.float16) for n, t in weights_cpu.items()}
+                weights_gpu = {
+                    n: t.to(self.device, dtype=torch.float16) for n, t in weights_cpu.items()
+                }
         else:
             weights_gpu = {n: t.to(dtype=torch.float16) for n, t in weights_cpu.items()}
 
@@ -598,8 +619,12 @@ class DynamicExpertCache:
         if not entry.is_on_gpu:
             return
 
-        cpu_weights = {name: self._prepare_cpu_tensor(tensor) for name, tensor in entry.weights.items()}
-        stored = self._compress_weights(cpu_weights) if self.config.compress_cpu_experts else cpu_weights
+        cpu_weights = {
+            name: self._prepare_cpu_tensor(tensor) for name, tensor in entry.weights.items()
+        }
+        stored = (
+            self._compress_weights(cpu_weights) if self.config.compress_cpu_experts else cpu_weights
+        )
         entry.weights = stored
         entry.is_on_gpu = False
         entry.compressed = self.config.compress_cpu_experts

@@ -332,9 +332,7 @@ class PolarQuantizer(nn.Module):
     # Lloyd-Max codebook
     # ------------------------------------------------------------------
 
-    def _init_codebook(
-        self, alpha: float, beta_val: float
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def _init_codebook(self, alpha: float, beta_val: float) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute Lloyd-Max codebook for the given Beta distribution.
 
         Args:
@@ -373,9 +371,7 @@ class PolarQuantizer(nn.Module):
         )
 
     @staticmethod
-    def _beta_conditional_mean(
-        alpha: float, beta_val: float, lo: float, hi: float
-    ) -> float:
+    def _beta_conditional_mean(alpha: float, beta_val: float, lo: float, hi: float) -> float:
         """E[X | lo < X < hi] for X ~ Beta(alpha, beta_val).
 
         Args:
@@ -405,9 +401,7 @@ class PolarQuantizer(nn.Module):
     # Forward (quantize)
     # ------------------------------------------------------------------
 
-    def forward(
-        self, x: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Quantize input tensor to packed 3-bit representation.
 
         Args:
@@ -422,12 +416,8 @@ class PolarQuantizer(nn.Module):
         if x.numel() == 0:
             packed_dim = math.ceil(self.head_dim * self.bits / 8)
             num_groups = math.ceil(self.head_dim / self.group_size)
-            packed = torch.empty(
-                *x.shape[:-1], packed_dim, dtype=torch.uint8, device=x.device
-            )
-            scales = torch.empty(
-                *x.shape[:-1], num_groups, dtype=torch.float32, device=x.device
-            )
+            packed = torch.empty(*x.shape[:-1], packed_dim, dtype=torch.uint8, device=x.device)
+            scales = torch.empty(*x.shape[:-1], num_groups, dtype=torch.float32, device=x.device)
             if self._legacy_api:
                 quantized = torch.empty(*x.shape, dtype=torch.int8, device=x.device)
                 return quantized, scales
@@ -692,9 +682,7 @@ class PolarQuantizer(nn.Module):
             ImportError: If safetensors is not installed.
         """
         if not _HAS_SAFETENSORS:
-            raise ImportError(
-                "safetensors is required. Install: pip install safetensors"
-            )
+            raise ImportError("safetensors is required. Install: pip install safetensors")
         tensors = {
             "levels": self._levels().cpu(),
             "boundaries": self._boundaries().cpu(),
@@ -732,9 +720,7 @@ class PolarQuantizer(nn.Module):
             ValueError: If head_dim does not match.
         """
         if not _HAS_SAFETENSORS:
-            raise ImportError(
-                "safetensors is required. Install: pip install safetensors"
-            )
+            raise ImportError("safetensors is required. Install: pip install safetensors")
         p = Path(path)
         if not p.exists():
             raise FileNotFoundError(f"Calibration file not found: {path}")
@@ -745,8 +731,7 @@ class PolarQuantizer(nn.Module):
             meta = json.loads(meta_path.read_text())
             if meta.get("head_dim") != self.head_dim:
                 raise ValueError(
-                    f"head_dim mismatch: file has {meta['head_dim']}, "
-                    f"config has {self.head_dim}"
+                    f"head_dim mismatch: file has {meta['head_dim']}, config has {self.head_dim}"
                 )
 
         tensors = load_file(str(p))
