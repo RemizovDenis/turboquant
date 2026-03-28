@@ -8,7 +8,7 @@ from turboquant.core.polar_quant import PolarQuantizer
 from turboquant.core.qjl import QJLResidualCorrector
 from turboquant.core.turboquant import CacheEntry, TurboQuantConfig, TurboQuantKVCache
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "PolarQuantizer",
