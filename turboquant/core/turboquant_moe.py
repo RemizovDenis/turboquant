@@ -15,10 +15,16 @@ import structlog
 import torch
 import torch.nn as nn
 
+from turboquant.core.adaptive_bitwidth import AdaptiveBitwithConfig
+from turboquant.core.cross_layer_kv import CrossLayerConfig
 from turboquant.core.expert_predictor import ExpertPredictor, ExpertPredictorConfig
+from turboquant.core.markov_prefetch import MarkovPrefetchConfig, MarkovTrajectoryPredictor
 from turboquant.core.moe_expert_cache import DynamicExpertCache, ExpertCacheConfig
 from turboquant.core.moe_router import MoERouterOptimizer, RouterOptimizerConfig, RouterOutput
+from turboquant.core.nash_router import GameTheoreticRouter, NashRouterConfig
+from turboquant.core.pid_vram import PIDConfig, VRAM_PID_Controller
 from turboquant.core.polar_quant import PolarQuantConfig, PolarQuantizer
+from turboquant.core.semantic_eviction import SemanticEvictionConfig
 from turboquant.core.turboquant import CacheEntry, TurboQuantConfig, TurboQuantKVCache
 
 LOGGER = structlog.get_logger(__name__)
@@ -31,12 +37,24 @@ class TurboQuantMoEConfig:
     kv_config: TurboQuantConfig
     expert_config: ExpertCacheConfig
     router_config: RouterOptimizerConfig
+    nash_router_config: NashRouterConfig | None = None
     predictor_config: ExpertPredictorConfig | None = None
+    markov_prefetch_config: MarkovPrefetchConfig | None = None
+    pid_config: PIDConfig | None = None
+    semantic_eviction_config: SemanticEvictionConfig | None = None
+    cross_layer_config: CrossLayerConfig | None = None
+    adaptive_bitwidth_config: AdaptiveBitwithConfig | None = None
     model_type: str = "auto"
     enable_kv_quant: bool = True
     enable_expert_cache: bool = True
     enable_router_opt: bool = True
     enable_expert_prediction: bool = True
+    enable_nash_routing: bool = True
+    enable_markov_prefetch: bool = True
+    enable_pid_vram: bool = True
+    enable_semantic_kv_eviction: bool = True
+    enable_cross_layer_kv: bool = True
+    enable_adaptive_bitwidth: bool = True
     profile_mode: bool = False
 
     @classmethod
@@ -94,18 +112,53 @@ class TurboQuantMoEConfig:
             device="cuda" if torch.cuda.is_available() else "cpu",
         )
         router_cfg = RouterOptimizerConfig(num_experts=num_experts, top_k=top_k)
+        nash_cfg = NashRouterConfig(num_experts=num_experts, top_k=top_k)
         predictor_cfg = ExpertPredictorConfig(
             hidden_dim=hidden_size,
             num_experts=num_experts,
             num_layers=num_layers,
             device="cuda" if torch.cuda.is_available() else "cpu",
         )
+        markov_cfg = MarkovPrefetchConfig(
+            num_layers=num_layers,
+            num_experts=num_experts,
+            top_k_experts=top_k,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        )
+        pid_cfg = PIDConfig(
+            min_cache_size=1,
+            max_cache_size=max(4, gpu_cache_size * 2),
+        )
+        semantic_cfg = SemanticEvictionConfig(
+            max_seq_len=kv_cfg.max_seq_len,
+            eviction_target_len=max(1, kv_cfg.max_seq_len // 2),
+            device=kv_cfg.device,
+            dtype=kv_cfg.dtype,
+        )
+        cross_cfg = CrossLayerConfig(
+            num_layers=num_layers,
+            device=kv_cfg.device,
+            dtype=kv_cfg.dtype,
+        )
+        adaptive_cfg = AdaptiveBitwithConfig(
+            head_dim=head_dim,
+            num_heads=num_heads,
+            vocab_size=128_000,
+            device=kv_cfg.device,
+            dtype=kv_cfg.dtype,
+        )
 
         return cls(
             kv_config=kv_cfg,
             expert_config=expert_cfg,
             router_config=router_cfg,
+            nash_router_config=nash_cfg,
             predictor_config=predictor_cfg,
+            markov_prefetch_config=markov_cfg,
+            pid_config=pid_cfg,
+            semantic_eviction_config=semantic_cfg,
+            cross_layer_config=cross_cfg,
+            adaptive_bitwidth_config=adaptive_cfg,
             model_type=model_type,
         )
 
@@ -157,13 +210,64 @@ class TurboQuantMoE:
         )
         self.quantizer = PolarQuantizer(pq_cfg)
 
+        config.kv_config.enable_semantic_eviction = config.enable_semantic_kv_eviction
+        config.kv_config.enable_cross_layer_sharing = config.enable_cross_layer_kv
+        config.kv_config.enable_adaptive_bitwidth = config.enable_adaptive_bitwidth
+        config.kv_config.semantic_eviction_config = config.semantic_eviction_config
+        config.kv_config.cross_layer_config = config.cross_layer_config
+        config.kv_config.adaptive_bitwidth_config = config.adaptive_bitwidth_config
         self.kv_cache = TurboQuantKVCache(config.kv_config)
         self.expert_cache = DynamicExpertCache(config.expert_config, quantizer=self.quantizer)
-        self.router = MoERouterOptimizer(config.router_config)
+        if config.enable_nash_routing:
+            nash_cfg = config.nash_router_config
+            if nash_cfg is None:
+                nash_cfg = NashRouterConfig(
+                    num_experts=config.router_config.num_experts,
+                    top_k=config.router_config.top_k,
+                    pruning_threshold=config.router_config.pruning_threshold,
+                    load_balance_alpha=config.router_config.load_balance_alpha,
+                    expert_dropout_rate=config.router_config.expert_dropout_rate,
+                    capacity_factor=config.router_config.capacity_factor,
+                    use_aux_loss=config.router_config.use_aux_loss,
+                    use_z_loss=config.router_config.use_z_loss,
+                    z_loss_coeff=config.router_config.z_loss_coeff,
+                    normalize_expert_weights=config.router_config.normalize_expert_weights,
+                    use_noise_during_training=config.router_config.use_noise_during_training,
+                    noise_std=config.router_config.noise_std,
+                    ema_decay=config.router_config.ema_decay,
+                )
+            self.router: MoERouterOptimizer = GameTheoreticRouter(nash_cfg)
+        else:
+            self.router = MoERouterOptimizer(config.router_config)
 
         self.predictor: ExpertPredictor | None = None
         if config.enable_expert_prediction and config.predictor_config is not None:
             self.predictor = ExpertPredictor(config.predictor_config)
+        self.markov_predictor: MarkovTrajectoryPredictor | None = None
+        if config.enable_markov_prefetch:
+            markov_cfg = config.markov_prefetch_config
+            if markov_cfg is None:
+                markov_cfg = MarkovPrefetchConfig(
+                    num_layers=config.expert_config.num_layers,
+                    num_experts=config.expert_config.num_experts,
+                    top_k_experts=config.expert_config.top_k_experts,
+                    device=config.expert_config.device,
+                )
+            self.markov_predictor = MarkovTrajectoryPredictor(markov_cfg, self.expert_cache)
+
+        self.pid_controller: VRAM_PID_Controller | None = None
+        if config.enable_pid_vram:
+            pid_cfg = config.pid_config
+            if pid_cfg is None:
+                pid_cfg = PIDConfig(
+                    min_cache_size=1,
+                    max_cache_size=max(config.expert_config.gpu_cache_size * 2, 4),
+                )
+            self.pid_controller = VRAM_PID_Controller(
+                config=pid_cfg,
+                expert_cache=self.expert_cache,
+                initial_cache_size=config.expert_config.gpu_cache_size,
+            )
 
         self._patched_forwards: dict[int, Any] = {}
         self._step_counter = 0
@@ -250,7 +354,22 @@ class TurboQuantMoE:
                 if predicted_experts:
                     self.expert_cache.prefetch_experts(predicted_experts, layer_id, priority=1.0)
 
-            router_out = self.router(router_logits=router_logits, training=False)
+            if isinstance(self.router, GameTheoreticRouter):
+                locations = torch.zeros(
+                    self.config.router_config.num_experts,
+                    dtype=torch.bool,
+                    device=router_logits.device,
+                )
+                for expert_id in range(self.config.router_config.num_experts):
+                    locations[expert_id] = (layer_id, expert_id) in self.expert_cache._gpu_experts
+                router_out = self.router(
+                    router_logits=router_logits,
+                    expert_locations_mask=locations,
+                    expert_current_load=None,
+                    training=False,
+                )
+            else:
+                router_out = self.router(router_logits=router_logits, training=False)
             active_experts = sorted({int(x) for x in router_out.expert_indices.flatten().tolist()})
 
             for expert_id in active_experts:
@@ -259,12 +378,46 @@ class TurboQuantMoE:
                 except torch.cuda.OutOfMemoryError:
                     self.expert_cache.evict(expert_id=expert_id, layer_id=layer_id)
 
+            if self.pid_controller is not None and self._step_counter % 4 == 0:
+                _, pid_state = self.pid_controller.step()
+                if pid_state.current_utilization > self.pid_controller.config.emergency_threshold:
+                    self.pid_controller.emergency_evict()
+
+            markov_prefetch: list[int] = []
+            if self.markov_predictor is not None and active_experts:
+                future = self.markov_predictor.predict(layer_id, active_experts)
+                self.markov_predictor.start_prefetch(future)
+                self.markov_predictor.on_layer_complete(layer_id, active_experts)
+                markov_prefetch = sorted(
+                    {expert_id for pred in future.values() for expert_id in pred.expert_ids}
+                )
+
+            entropy: torch.Tensor | None = None
+            if self.config.enable_adaptive_bitwidth:
+                probs = torch.softmax(router_logits.float(), dim=-1)
+                token_entropy = -(probs * torch.log(probs.clamp_min(1e-8))).sum(dim=-1)
+                seq_len = int(keys.shape[2])
+                if token_entropy.numel() >= seq_len:
+                    entropy = token_entropy[:seq_len]
+
             try:
-                cache_entry = self.kv_cache.compress(keys, values)
+                cache_entry = self.kv_cache.compress(
+                    keys,
+                    values,
+                    layer_id=layer_id,
+                    token_ids=None,
+                    attention_entropy=entropy,
+                )
             except torch.cuda.OutOfMemoryError:
                 keys_cpu = keys.detach().cpu()
                 values_cpu = values.detach().cpu()
-                cache_entry = self.kv_cache.compress(keys_cpu, values_cpu)
+                cache_entry = self.kv_cache.compress(
+                    keys_cpu,
+                    values_cpu,
+                    layer_id=layer_id,
+                    token_ids=None,
+                    attention_entropy=entropy,
+                )
 
             if self.predictor is not None and self.config.enable_expert_prediction:
                 self.predictor.update_history(layer_id, active_experts)
@@ -273,9 +426,8 @@ class TurboQuantMoE:
 
             latency_ms = (time.perf_counter() - t_start) * 1000.0
             after = self.memory_report().total_saved_mb
-            prediction_ok = (
-                set(predicted_experts) >= set(active_experts) if predicted_experts else False
-            )
+            prediction_union = set(predicted_experts) | set(markov_prefetch)
+            prediction_ok = set(active_experts).issubset(prediction_union)
 
             self._step_counter += 1
             if self.config.profile_mode:
@@ -295,12 +447,19 @@ class TurboQuantMoE:
                     total_saved_percent=rep.total_saved_percent,
                     expert_hit_rate=rep.expert_hit_rate,
                 )
+                if self.markov_predictor is not None:
+                    ms = self.markov_predictor.stats()
+                    self._logger.info(
+                        "markov_report",
+                        accuracy_at_k=ms.accuracy_at_k,
+                        entropy=ms.transition_matrix_entropy,
+                    )
 
             return MoEStepOutput(
                 cache_entry=cache_entry,
                 router_output=router_out,
                 active_experts=active_experts,
-                predicted_experts=predicted_experts,
+                predicted_experts=sorted(prediction_union),
                 prediction_was_correct=prediction_ok,
                 memory_delta_mb=after - before,
                 step_latency_ms=latency_ms,
@@ -405,14 +564,36 @@ class TurboQuantMoE:
             "kv_config": _to_json_dict(self.config.kv_config),
             "expert_config": _to_json_dict(self.config.expert_config),
             "router_config": _to_json_dict(self.config.router_config),
+            "nash_router_config": _to_json_dict(self.config.nash_router_config)
+            if self.config.nash_router_config
+            else None,
             "predictor_config": _to_json_dict(self.config.predictor_config)
             if self.config.predictor_config
+            else None,
+            "markov_prefetch_config": _to_json_dict(self.config.markov_prefetch_config)
+            if self.config.markov_prefetch_config
+            else None,
+            "pid_config": _to_json_dict(self.config.pid_config) if self.config.pid_config else None,
+            "semantic_eviction_config": _to_json_dict(self.config.semantic_eviction_config)
+            if self.config.semantic_eviction_config
+            else None,
+            "cross_layer_config": _to_json_dict(self.config.cross_layer_config)
+            if self.config.cross_layer_config
+            else None,
+            "adaptive_bitwidth_config": _to_json_dict(self.config.adaptive_bitwidth_config)
+            if self.config.adaptive_bitwidth_config
             else None,
             "model_type": self.config.model_type,
             "enable_kv_quant": self.config.enable_kv_quant,
             "enable_expert_cache": self.config.enable_expert_cache,
             "enable_router_opt": self.config.enable_router_opt,
             "enable_expert_prediction": self.config.enable_expert_prediction,
+            "enable_nash_routing": self.config.enable_nash_routing,
+            "enable_markov_prefetch": self.config.enable_markov_prefetch,
+            "enable_pid_vram": self.config.enable_pid_vram,
+            "enable_semantic_kv_eviction": self.config.enable_semantic_kv_eviction,
+            "enable_cross_layer_kv": self.config.enable_cross_layer_kv,
+            "enable_adaptive_bitwidth": self.config.enable_adaptive_bitwidth,
             "profile_mode": self.config.profile_mode,
         }
         (base / "config.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
@@ -421,6 +602,8 @@ class TurboQuantMoE:
         torch.save(self.router.state_dict(), base / "router.pt")
         if self.predictor is not None:
             self.predictor.save(str(base / "predictor"))
+        if self.markov_predictor is not None:
+            self.markov_predictor.save(str(base / "markov"))
 
     @classmethod
     def load(cls, path: str, device: str = "cuda") -> TurboQuantMoE:
@@ -428,27 +611,76 @@ class TurboQuantMoE:
         base = Path(path)
         cfg = json.loads((base / "config.json").read_text(encoding="utf-8"))
 
-        kv_cfg = TurboQuantConfig(**cfg["kv_config"])
+        kv_payload = dict(cfg["kv_config"])
+        if "dtype" in kv_payload:
+            kv_payload["dtype"] = _parse_dtype(kv_payload["dtype"])
+        kv_cfg = TurboQuantConfig(**kv_payload)
         kv_cfg.device = device
         exp_cfg = ExpertCacheConfig(**cfg["expert_config"])
         exp_cfg.device = device
         router_cfg = RouterOptimizerConfig(**cfg["router_config"])
+        nash_cfg = None
+        if cfg.get("nash_router_config") is not None:
+            nash_cfg = NashRouterConfig(**cfg["nash_router_config"])
 
         pred_cfg = None
         if cfg["predictor_config"] is not None:
             pred_cfg = ExpertPredictorConfig(**cfg["predictor_config"])
             pred_cfg.device = device
+        markov_cfg = None
+        if cfg.get("markov_prefetch_config") is not None:
+            markov_cfg = MarkovPrefetchConfig(**cfg["markov_prefetch_config"])
+            markov_cfg.device = device
+        pid_cfg = None
+        if cfg.get("pid_config") is not None:
+            pid_cfg = PIDConfig(**cfg["pid_config"])
+
+        semantic_cfg = None
+        if cfg.get("semantic_eviction_config") is not None:
+            sem_payload = dict(cfg["semantic_eviction_config"])
+            if "dtype" in sem_payload:
+                sem_payload["dtype"] = _parse_dtype(sem_payload["dtype"])
+            semantic_cfg = SemanticEvictionConfig(**sem_payload)
+            semantic_cfg.device = device
+
+        cross_cfg = None
+        if cfg.get("cross_layer_config") is not None:
+            cross_payload = dict(cfg["cross_layer_config"])
+            if "dtype" in cross_payload:
+                cross_payload["dtype"] = _parse_dtype(cross_payload["dtype"])
+            cross_cfg = CrossLayerConfig(**cross_payload)
+            cross_cfg.device = device
+
+        adaptive_cfg = None
+        if cfg.get("adaptive_bitwidth_config") is not None:
+            adaptive_payload = dict(cfg["adaptive_bitwidth_config"])
+            if "dtype" in adaptive_payload:
+                adaptive_payload["dtype"] = _parse_dtype(adaptive_payload["dtype"])
+            adaptive_cfg = AdaptiveBitwithConfig(**adaptive_payload)
+            adaptive_cfg.device = device
 
         tcfg = TurboQuantMoEConfig(
             kv_config=kv_cfg,
             expert_config=exp_cfg,
             router_config=router_cfg,
+            nash_router_config=nash_cfg,
             predictor_config=pred_cfg,
+            markov_prefetch_config=markov_cfg,
+            pid_config=pid_cfg,
+            semantic_eviction_config=semantic_cfg,
+            cross_layer_config=cross_cfg,
+            adaptive_bitwidth_config=adaptive_cfg,
             model_type=cfg["model_type"],
             enable_kv_quant=bool(cfg["enable_kv_quant"]),
             enable_expert_cache=bool(cfg["enable_expert_cache"]),
             enable_router_opt=bool(cfg["enable_router_opt"]),
             enable_expert_prediction=bool(cfg["enable_expert_prediction"]),
+            enable_nash_routing=bool(cfg.get("enable_nash_routing", False)),
+            enable_markov_prefetch=bool(cfg.get("enable_markov_prefetch", False)),
+            enable_pid_vram=bool(cfg.get("enable_pid_vram", False)),
+            enable_semantic_kv_eviction=bool(cfg.get("enable_semantic_kv_eviction", False)),
+            enable_cross_layer_kv=bool(cfg.get("enable_cross_layer_kv", False)),
+            enable_adaptive_bitwidth=bool(cfg.get("enable_adaptive_bitwidth", False)),
             profile_mode=bool(cfg["profile_mode"]),
         )
 
@@ -457,6 +689,8 @@ class TurboQuantMoE:
         obj.router.load_state_dict(torch.load(base / "router.pt", map_location="cpu"))
         if obj.predictor is not None and (base / "predictor").exists():
             obj.predictor.load(str(base / "predictor"))
+        if obj.markov_predictor is not None and (base / "markov").exists():
+            obj.markov_predictor.load(str(base / "markov"))
         return obj
 
     def __enter__(self) -> TurboQuantMoE:
@@ -464,6 +698,8 @@ class TurboQuantMoE:
 
     def __exit__(self, *_: Any) -> None:
         with self._lock:
+            if self.pid_controller is not None:
+                self.pid_controller.stop_background()
             for key in list(self.expert_cache._gpu_experts):
                 layer_id, expert_id = key
                 self.expert_cache.evict(expert_id=expert_id, layer_id=layer_id)
@@ -537,3 +773,15 @@ def _to_json_dict(obj: Any) -> dict[str, Any]:
         else:
             out[key] = value
     return out
+
+
+def _parse_dtype(value: Any) -> torch.dtype:
+    if isinstance(value, torch.dtype):
+        return value
+    if isinstance(value, str):
+        candidate = value.replace("torch.", "")
+        if hasattr(torch, candidate):
+            attr = getattr(torch, candidate)
+            if isinstance(attr, torch.dtype):
+                return attr
+    return torch.float16

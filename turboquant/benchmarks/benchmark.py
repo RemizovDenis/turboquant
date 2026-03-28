@@ -25,8 +25,10 @@ import torch
 from tqdm import tqdm
 
 from turboquant.core.expert_predictor import ExpertPredictor, ExpertPredictorConfig
+from turboquant.core.markov_prefetch import MarkovPrefetchConfig, MarkovTrajectoryPredictor
 from turboquant.core.moe_expert_cache import DynamicExpertCache, ExpertCacheConfig
 from turboquant.core.moe_router import MoERouterOptimizer, RouterOptimizerConfig
+from turboquant.core.nash_router import GameTheoreticRouter, NashRouterConfig
 from turboquant.core.turboquant import TurboQuantConfig, TurboQuantKVCache
 from turboquant.core.turboquant_moe import TurboQuantMoE, TurboQuantMoEConfig
 from turboquant.kernels.triton_quant import benchmark_triton_kernels
@@ -208,43 +210,83 @@ class BenchmarkRunner:
             device=self.ctx.device,
         )
         cache = DynamicExpertCache(cfg)
+        markov = MarkovTrajectoryPredictor(
+            MarkovPrefetchConfig(
+                num_layers=cfg.num_layers,
+                num_experts=cfg.num_experts,
+                top_k_experts=cfg.top_k_experts,
+                lookahead_steps=2,
+                min_prefetch_prob=0.05,
+                prefetch_threshold=0.2,
+                max_pending_prefetches=64,
+                device=self.ctx.device,
+            ),
+            cache,
+        )
 
         weights = {
-            "gate": torch.randn(4096, 4096),
-            "up": torch.randn(4096, 4096),
-            "down": torch.randn(4096, 4096),
+            "gate": torch.randn(1024, 1024),
+            "up": torch.randn(1024, 1024),
+            "down": torch.randn(1024, 1024),
         }
         for layer in range(cfg.num_layers):
             for expert in range(cfg.num_experts):
                 cache.register_expert(expert, layer, weights)
 
         latencies = []
-        for _ in tqdm(range(50), desc="moe_expert"):
+        for step in tqdm(range(50), desc="moe_expert"):
+            layer_id = step % cfg.num_layers
+            base = (step * 3 + layer_id) % cfg.num_experts
+            active = [base, (base + 1) % cfg.num_experts]
+
+            predictions = markov.predict(layer_id, active)
+            markov.start_prefetch(predictions)
+
             t0 = time.perf_counter()
-            cache.get_expert(
-                expert_id=np.random.randint(0, cfg.num_experts),
-                layer_id=np.random.randint(0, cfg.num_layers),
-            )
+            for expert_id in active:
+                cache.get_expert(expert_id=expert_id, layer_id=layer_id)
             latencies.append((time.perf_counter() - t0) * 1000)
+            markov.on_layer_complete(layer_id, active)
 
         stats = cache.stats()
+        markov_stats = markov.stats()
         return {
             "hit_rate": stats.hit_rate,
             "avg_expert_load_latency_ms": float(np.mean(latencies)),
             "prefetch_accuracy": stats.avg_prefetch_accuracy,
             "gpu_memory_saved_gb": stats.gpu_memory_saved_mb / 1024,
+            "markov_accuracy_at_k": markov_stats.accuracy_at_k,
+            "markov_accuracy_at_1": markov_stats.accuracy_at_1,
+            "markov_io_hidden_ms": markov_stats.io_latency_hidden_ms,
         }
 
     def moe_router_benchmark(self) -> dict[str, Any]:
         cfg = RouterOptimizerConfig(num_experts=8, top_k=2)
         router = MoERouterOptimizer(cfg)
+        nash = GameTheoreticRouter(NashRouterConfig(num_experts=8, top_k=2, nash_iterations=3))
         logits = torch.randn(4096, 8, device=self.ctx.device)
         out = router(logits, training=False)
         util = router.get_expert_utilization()
+
+        locations = torch.zeros(8, dtype=torch.bool, device=self.ctx.device)
+        locations[:4] = True
+        nash_out = nash(logits, expert_locations_mask=locations, training=False)
+        nash_util = nash.get_expert_utilization()
+        nash_stats = nash.get_nash_stats()
+        improvement = util[-1] / max(1e-8, nash_util[-1])
+
         return {
             "dropped_tokens": out.dropped_tokens,
             "imbalance_ratio": util[-1],
             "expert_load_mean": float(out.expert_load.mean().item()),
+            "nash_imbalance_ratio": nash_util[-1],
+            "nash_dropped_tokens": nash_out.dropped_tokens,
+            "nash_convergence_rate": nash_stats["nash_convergence_rate"],
+            "nash_avg_iterations": nash_stats["avg_iterations"],
+            "nash_overhead_ms": nash.overhead_ms(
+                num_tokens=512, num_experts=8, n_warmup=2, n_iters=20
+            ),
+            "imbalance_improvement_x": float(improvement),
         }
 
     def predictor_benchmark(self) -> dict[str, Any]:

@@ -113,6 +113,79 @@ def _random_orthogonal(dim: int, seed: int) -> torch.Tensor:
 # ======================================================================
 
 
+def pack_bits(x: torch.Tensor, bits: int) -> torch.Tensor:
+    """Pack low-bit integer values into dense uint8 representation.
+
+    Args:
+        x: Int tensor with values in ``[0, 2**bits - 1]``. Last dim is packed.
+        bits: Bit-width per value in ``[1, 8]``.
+
+    Returns:
+        Uint8 tensor with last dimension ``ceil(N*bits/8)``.
+    """
+    if bits < 1 or bits > 8:
+        raise ValueError(f"bits must be in [1, 8], got {bits}")
+    if x.numel() == 0:
+        out_n = 0
+        out_shape = list(x.shape[:-1]) + [out_n]
+        return torch.empty(out_shape, dtype=torch.uint8, device=x.device)
+
+    leading = x.shape[:-1]
+    n = int(x.shape[-1])
+    flat = x.reshape(-1, n).to(torch.int32)
+    bsz = flat.shape[0]
+    out_bytes = math.ceil(n * bits / 8)
+    out = torch.zeros((bsz, out_bytes), dtype=torch.int32, device=x.device)
+
+    for idx in range(n):
+        base_pos = idx * bits
+        value = flat[:, idx]
+        for bit in range(bits):
+            bit_val = (value >> bit) & 1
+            bit_pos = base_pos + bit
+            byte_idx = bit_pos // 8
+            bit_off = bit_pos % 8
+            out[:, byte_idx] |= bit_val << bit_off
+
+    return out.to(torch.uint8).reshape(*leading, out_bytes)
+
+
+def unpack_bits(packed: torch.Tensor, original_n: int, bits: int) -> torch.Tensor:
+    """Unpack dense uint8 tensor to low-bit integer values.
+
+    Args:
+        packed: Uint8 tensor from :func:`pack_bits`.
+        original_n: Original number of values in last dimension.
+        bits: Bit-width per value in ``[1, 8]``.
+
+    Returns:
+        Int8 tensor with last dimension ``original_n``.
+    """
+    if bits < 1 or bits > 8:
+        raise ValueError(f"bits must be in [1, 8], got {bits}")
+    if packed.numel() == 0:
+        out_shape = list(packed.shape[:-1]) + [original_n]
+        return torch.empty(out_shape, dtype=torch.int8, device=packed.device)
+
+    leading = packed.shape[:-1]
+    flat = packed.reshape(-1, packed.shape[-1]).to(torch.int32)
+    bsz = flat.shape[0]
+    values = torch.zeros((bsz, original_n), dtype=torch.int32, device=packed.device)
+
+    for idx in range(original_n):
+        base_pos = idx * bits
+        v = torch.zeros((bsz,), dtype=torch.int32, device=packed.device)
+        for bit in range(bits):
+            bit_pos = base_pos + bit
+            byte_idx = bit_pos // 8
+            bit_off = bit_pos % 8
+            bit_val = (flat[:, byte_idx] >> bit_off) & 1
+            v |= bit_val << bit
+        values[:, idx] = v
+
+    return values.reshape(*leading, original_n).to(torch.int8)
+
+
 def pack_3bit(x: torch.Tensor) -> torch.Tensor:
     """Pack 3-bit values (0-7) into dense uint8 representation.
 
@@ -128,42 +201,7 @@ def pack_3bit(x: torch.Tensor) -> torch.Tensor:
     Returns:
         Uint8 tensor with last dimension ``ceil(N*3/8)``.
     """
-    if x.numel() == 0:
-        out_n = 0
-        out_shape = list(x.shape[:-1]) + [out_n]
-        return torch.empty(out_shape, dtype=torch.uint8, device=x.device)
-
-    leading = x.shape[:-1]
-    n = x.shape[-1]
-    flat = x.reshape(-1, n).to(torch.int32)
-
-    # Pad to multiple of 8
-    pad_n = (8 - n % 8) % 8
-    if pad_n:
-        flat = torch.nn.functional.pad(flat, (0, pad_n), value=0)
-    padded_n = flat.shape[-1]
-    groups = padded_n // 8
-    grouped = flat.reshape(-1, groups, 8)  # (B, G, 8)
-
-    g0 = grouped.select(-1, 0)
-    g1 = grouped.select(-1, 1)
-    g2 = grouped.select(-1, 2)
-    g3 = grouped.select(-1, 3)
-    g4 = grouped.select(-1, 4)
-    g5 = grouped.select(-1, 5)
-    g6 = grouped.select(-1, 6)
-    g7 = grouped.select(-1, 7)
-
-    b0 = (g0 & 0x7) | ((g1 & 0x7) << 3) | ((g2 & 0x3) << 6)
-    b1 = ((g2 >> 2) & 0x1) | ((g3 & 0x7) << 1) | ((g4 & 0x7) << 4) | ((g5 & 0x1) << 7)
-    b2 = ((g5 >> 1) & 0x3) | ((g6 & 0x7) << 2) | ((g7 & 0x7) << 5)
-
-    packed = torch.stack([b0, b1, b2], dim=-1)  # (B, G, 3)
-    packed = packed.reshape(-1, groups * 3).to(torch.uint8)
-
-    out_bytes = math.ceil(n * 3 / 8)
-    packed = packed.narrow(-1, 0, out_bytes)
-    return packed.reshape(*leading, out_bytes)
+    return pack_bits(x, bits=3)
 
 
 def unpack_3bit(packed: torch.Tensor, original_n: int) -> torch.Tensor:
@@ -176,37 +214,7 @@ def unpack_3bit(packed: torch.Tensor, original_n: int) -> torch.Tensor:
     Returns:
         Int8 tensor with last dimension ``original_n``, values in ``[0, 7]``.
     """
-    if packed.numel() == 0:
-        out_shape = list(packed.shape[:-1]) + [original_n]
-        return torch.empty(out_shape, dtype=torch.int8, device=packed.device)
-
-    leading = packed.shape[:-1]
-    flat = packed.reshape(-1, packed.shape[-1]).to(torch.int32)
-
-    # Pad to multiple of 3
-    pad_bytes = (3 - flat.shape[-1] % 3) % 3
-    if pad_bytes:
-        flat = torch.nn.functional.pad(flat, (0, pad_bytes), value=0)
-    groups = flat.shape[-1] // 3
-    grouped = flat.reshape(-1, groups, 3)  # (B, G, 3)
-
-    b0 = grouped.select(-1, 0)
-    b1 = grouped.select(-1, 1)
-    b2 = grouped.select(-1, 2)
-
-    v0 = b0 & 0x7
-    v1 = (b0 >> 3) & 0x7
-    v2 = ((b0 >> 6) & 0x3) | ((b1 & 0x1) << 2)
-    v3 = (b1 >> 1) & 0x7
-    v4 = (b1 >> 4) & 0x7
-    v5 = ((b1 >> 7) & 0x1) | ((b2 & 0x3) << 1)
-    v6 = (b2 >> 2) & 0x7
-    v7 = (b2 >> 5) & 0x7
-
-    unpacked = torch.stack([v0, v1, v2, v3, v4, v5, v6, v7], dim=-1)
-    unpacked = unpacked.reshape(-1, groups * 8)
-    unpacked = unpacked.narrow(-1, 0, original_n)
-    return unpacked.reshape(*leading, original_n).to(torch.int8)
+    return unpack_bits(packed, original_n=original_n, bits=3)
 
 
 # ======================================================================
@@ -456,8 +464,8 @@ class PolarQuantizer(nn.Module):
         indices = indices.reshape(-1, padded_dim).narrow(-1, 0, self.head_dim)
         indices = indices.reshape(*original_shape[:-1], self.head_dim)
 
-        # 4. Pack 3-bit
-        packed = pack_3bit(indices)
+        # 4. Pack to true low-bit storage.
+        packed = pack_bits(indices, bits=self.bits)
 
         # Reshape scales
         scales = scales.reshape(*original_shape[:-1], num_groups)
@@ -509,7 +517,7 @@ class PolarQuantizer(nn.Module):
         if packed.dtype == torch.int8 and packed.shape[-1] == head_dim:
             indices = packed
         else:
-            indices = unpack_3bit(packed, head_dim)  # int8, 0-7
+            indices = unpack_bits(packed, original_n=head_dim, bits=self.bits)
 
         # 2. Codebook lookup
         lvl = self._levels().to(indices.device)

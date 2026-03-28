@@ -6,7 +6,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pandas as pd
@@ -15,6 +15,11 @@ import torch
 
 from turboquant.core.polar_quant import PolarQuantConfig, PolarQuantizer
 from turboquant.core.qjl import QJLConfig, QJLResidualCorrector
+
+if TYPE_CHECKING:
+    from turboquant.core.adaptive_bitwidth import AdaptiveBitwithConfig
+    from turboquant.core.cross_layer_kv import CrossLayerConfig, CrossLayerKVCache
+    from turboquant.core.semantic_eviction import SemanticEvictionConfig, SemanticKVEviction
 
 log = structlog.get_logger(__name__)
 
@@ -36,6 +41,12 @@ class TurboQuantConfig:
     seed: int = 42
     max_seq_len: int = 131072
     cpu_offload_threshold_mb: float = 1024.0
+    enable_semantic_eviction: bool = False
+    enable_cross_layer_sharing: bool = False
+    enable_adaptive_bitwidth: bool = False
+    semantic_eviction_config: SemanticEvictionConfig | None = None
+    cross_layer_config: CrossLayerConfig | None = None
+    adaptive_bitwidth_config: AdaptiveBitwithConfig | None = None
 
     @classmethod
     def from_model_config(cls, model_config: Any) -> TurboQuantConfig:
@@ -124,6 +135,56 @@ class TurboQuantKVCache:
                 )
             ).to(self.device)
 
+        self.semantic_evictor: SemanticKVEviction | None = None
+        self.cross_layer_cache: CrossLayerKVCache | None = None
+        self.adaptive_quantizer: AdaptiveBitwidthQuantizer | None = None
+        self._cross_base_cache: TurboQuantKVCache | None = None
+
+        if config.enable_semantic_eviction:
+            from turboquant.core.semantic_eviction import (
+                SemanticEvictionConfig,
+                SemanticKVEviction,
+            )
+
+            sem_cfg = config.semantic_eviction_config or SemanticEvictionConfig(
+                max_seq_len=config.max_seq_len,
+                eviction_target_len=max(config.max_seq_len // 2, 1),
+                device=str(self.device),
+                dtype=config.dtype,
+            )
+            self.semantic_evictor = SemanticKVEviction(
+                config=sem_cfg,
+                head_dim=config.head_dim,
+                num_heads=config.num_heads,
+            )
+
+        if config.enable_adaptive_bitwidth:
+            from turboquant.core.adaptive_bitwidth import (
+                AdaptiveBitwidthQuantizer,
+                AdaptiveBitwithConfig,
+            )
+
+            adapt_cfg = config.adaptive_bitwidth_config or AdaptiveBitwithConfig(
+                head_dim=config.head_dim,
+                num_heads=config.num_heads,
+                vocab_size=128_000,
+                device=str(self.device),
+                dtype=config.dtype,
+            )
+            self.adaptive_quantizer = AdaptiveBitwidthQuantizer(adapt_cfg)
+
+        if config.enable_cross_layer_sharing:
+            from turboquant.core.cross_layer_kv import CrossLayerConfig, CrossLayerKVCache
+
+            cross_cfg = config.cross_layer_config or CrossLayerConfig(
+                num_layers=32,
+                device=str(self.device),
+                dtype=config.dtype,
+            )
+            base_cfg = self._base_config_for_cross()
+            self._cross_base_cache = TurboQuantKVCache(base_cfg)
+            self.cross_layer_cache = CrossLayerKVCache(cross_cfg, self._cross_base_cache)
+
         log.info(
             "TurboQuantKVCache.init",
             head_dim=config.head_dim,
@@ -139,11 +200,104 @@ class TurboQuantKVCache:
         if torch.cuda.is_available() and self.device.type == "cuda":
             torch.cuda.empty_cache()
 
-    def compress(self, keys: torch.Tensor, values: torch.Tensor) -> CacheEntry:
-        """Compress key/value tensors into a cache entry."""
+    def _base_config_for_cross(self) -> TurboQuantConfig:
+        """Create a plain TurboQuant config for cross-layer anchor compression."""
+        return TurboQuantConfig(
+            head_dim=self.config.head_dim,
+            num_heads=self.config.num_heads,
+            bits=self.config.bits,
+            group_size=self.config.group_size,
+            residual_correction=self.config.residual_correction,
+            sketch_dim=self.config.sketch_dim,
+            use_triton_kernels=self.config.use_triton_kernels,
+            use_hadamard=self.config.use_hadamard,
+            device=str(self.device),
+            dtype=self.config.dtype,
+            seed=self.config.seed,
+            max_seq_len=self.config.max_seq_len,
+            cpu_offload_threshold_mb=self.config.cpu_offload_threshold_mb,
+            enable_semantic_eviction=False,
+            enable_cross_layer_sharing=False,
+            enable_adaptive_bitwidth=False,
+        )
+
+    def compress(
+        self,
+        keys: torch.Tensor,
+        values: torch.Tensor,
+        layer_id: int | None = None,
+        token_ids: torch.Tensor | None = None,
+        attention_entropy: torch.Tensor | None = None,
+    ) -> CacheEntry:
+        """Compress key/value tensors into a cache entry.
+
+        Args:
+            keys: Key tensor.
+            values: Value tensor.
+            layer_id: Optional layer id used by cross-layer compression.
+            token_ids: Optional token ids for adaptive bitwidth.
+            attention_entropy: Optional entropy signal for adaptive bitwidth.
+        """
         with self._lock:
+            keys_in = keys.to(self.device)
+            values_in = values.to(self.device)
+            eviction_result: Any = None
+
+            if self.semantic_evictor is not None:
+                seq_len = int(keys_in.shape[2]) if keys_in.ndim >= 3 else 0
+                if seq_len > int(self.semantic_evictor.config.eviction_target_len):
+                    keys_in, values_in, eviction_result = self.semantic_evictor.evict(
+                        keys_in, values_in, layer_id or 0
+                    )
+
             try:
-                entry = self._compress_impl(keys.to(self.device), values.to(self.device))
+                entry: CacheEntry
+                if self.cross_layer_cache is not None and layer_id is not None:
+                    cross_entry = self.cross_layer_cache.compress(layer_id, keys_in, values_in)
+                    if cross_entry.is_anchor and cross_entry.anchor_entry is not None:
+                        entry = cross_entry.anchor_entry
+                    else:
+                        if cross_entry.delta_packed is None or cross_entry.delta_scales is None:
+                            raise ValueError(
+                                "delta payload missing for non-anchor cross-layer entry"
+                            )
+                        entry = CacheEntry(
+                            compressed_keys=(
+                                cross_entry.delta_packed[0],
+                                cross_entry.delta_scales[0],
+                            ),
+                            compressed_values=(
+                                cross_entry.delta_packed[1],
+                                cross_entry.delta_scales[1],
+                            ),
+                            metadata={
+                                "original_shape": cross_entry.metadata["original_shape"],
+                                "seq_len": int(cross_entry.metadata["original_shape"][2]),
+                                "device": str(keys_in.device),
+                            },
+                        )
+                    entry.metadata["cross_layer_entry"] = cross_entry
+                elif self.adaptive_quantizer is not None:
+                    adaptive_cache = self.adaptive_quantizer.compress(
+                        keys_in,
+                        values_in,
+                        token_ids=token_ids,
+                        attention_entropy=attention_entropy,
+                    )
+                    empty_u8 = torch.empty((0,), dtype=torch.uint8, device=self.device)
+                    empty_f32 = torch.empty((0,), dtype=torch.float32, device=self.device)
+                    entry = CacheEntry(
+                        compressed_keys=(empty_u8, empty_f32),
+                        compressed_values=(empty_u8.clone(), empty_f32.clone()),
+                        metadata={
+                            "original_shape": list(adaptive_cache.original_shape),
+                            "seq_len": int(adaptive_cache.original_shape[2]),
+                            "device": str(keys_in.device),
+                            "adaptive_cache": adaptive_cache,
+                        },
+                    )
+                else:
+                    entry = self._compress_impl(keys_in, values_in)
             except torch.cuda.OutOfMemoryError:
                 log.warning("OOM during compress, retrying on CPU")
                 self.device = torch.device("cpu")
@@ -151,6 +305,13 @@ class TurboQuantKVCache:
                 if self.corrector is not None:
                     self.corrector = self.corrector.to(self.device)
                 entry = self._compress_impl(keys.cpu(), values.cpu())
+
+            if eviction_result is not None:
+                entry.metadata["semantic_eviction"] = {
+                    "kept_tokens": int(eviction_result.kept_indices.numel()),
+                    "evicted_tokens": int(eviction_result.evicted_indices.numel()),
+                    "eviction_ratio": eviction_result.eviction_ratio,
+                }
 
             mem = self.memory_usage(entry)
             log.info(
@@ -197,6 +358,23 @@ class TurboQuantKVCache:
         """Decompress cache entry back to key/value tensors."""
         with self._lock:
             entry.access_count += 1
+            if "cross_layer_entry" in entry.metadata:
+                if self.cross_layer_cache is None:
+                    raise RuntimeError(
+                        "cross-layer entry present but cross_layer_cache is not initialized"
+                    )
+                cross_entry = cast(Any, entry.metadata["cross_layer_entry"])
+                return self.cross_layer_cache.decompress(cross_entry)
+
+            if "adaptive_cache" in entry.metadata:
+                if self.adaptive_quantizer is None:
+                    raise RuntimeError(
+                        "adaptive entry present but adaptive_quantizer is not initialized"
+                    )
+                adaptive_cache = cast(Any, entry.metadata["adaptive_cache"])
+                shape = tuple(int(v) for v in entry.metadata["original_shape"])
+                return self.adaptive_quantizer.decompress(adaptive_cache, shape)
+
             shape = tuple(int(v) for v in entry.metadata["original_shape"])
             k = self.quantizer.dequantize(entry.compressed_keys[0], entry.compressed_keys[1], shape)
             v = self.quantizer.dequantize(
@@ -246,6 +424,31 @@ class TurboQuantKVCache:
 
         def nbytes(t: torch.Tensor | None) -> int:
             return 0 if t is None else int(t.nelement() * t.element_size())
+
+        if "adaptive_cache" in entry.metadata:
+            adaptive_cache = cast(Any, entry.metadata["adaptive_cache"])
+            total_bytes = 0
+            for packed, scales, mask, _ in adaptive_cache.components:
+                total_bytes += nbytes(packed)
+                total_bytes += nbytes(scales)
+                total_bytes += nbytes(mask)
+
+            shape = entry.metadata.get("original_shape", [1, 1, 1, 1])
+            fp16_baseline_bytes = int(np.prod(shape)) * 2 * 2
+            ratio = total_bytes / max(fp16_baseline_bytes, 1)
+            return {
+                "kv_compressed_bytes": float(total_bytes),
+                "residual_bytes": 0.0,
+                "scales_bytes": 0.0,
+                "total_bytes": float(total_bytes),
+                "total_mb": total_bytes / (1024**2),
+                "fp16_baseline_mb": fp16_baseline_bytes / (1024**2),
+                "compression_ratio": ratio,
+                "actual_savings_percent": (1.0 - ratio) * 100.0,
+                "bytes": float(total_bytes),
+                "mb": total_bytes / (1024**2),
+                "ratio": ratio,
+            }
 
         kv_compressed_bytes = (
             nbytes(entry.compressed_keys[0])
