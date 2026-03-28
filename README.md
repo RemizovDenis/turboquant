@@ -9,17 +9,18 @@
 
 Long-context inference and MoE serving are memory-bound: KV cache grows with sequence length, and MoE layers keep many expert weights resident even when only top-k experts are active each step. TurboQuant-MoE combines packed low-bit KV storage, adaptive per-token bitwidth control, dynamic expert offloading, and speculative prefetch.
 
-Latest full benchmark snapshot (`results/benchmark_20260328_074849.json`, CPU fallback):
+Latest full benchmark snapshot (`results/benchmark_20260328_080540.json`, CPU fallback):
 
-- KV compression: **8.49x average** (`seq_len=1k..16k`)
+- KV compression: **8.53x average** (`seq_len=1k..16k`)
 - Needle-in-haystack quality: **100% recall@1** (`1k..128k`)
 - Retrieval degradation: **0.0%** on tested slices
-- MoE cache hit rate: **93.75%**
-- Prefetch readiness: **94.25%**
+- MoE cache hit rate: **96.75%**
+- Prefetch readiness: **96.75%**
 - Hidden IO ratio: **100%**
 - Expert cache GPU memory saved: **6.42 GB**
-- Predictor latency: **0.097 ms mean** (`p99 = 0.122 ms`)
-- Latency stability (MoE step): **p99 = 23.48 ms**
+- Predictor latency: **0.099 ms mean** (`p99 = 0.142 ms`)
+- Latency stability (MoE step): **p99 = 8.92 ms**
+- Projected decode throughput gain in IO-bound regime: **8.48x average**
 
 Included extensions:
 
@@ -32,7 +33,7 @@ Included extensions:
 
 ## Benchmarks
 
-Numbers below come from `results/benchmark_20260328_074849.json` and `results/README_benchmark.md`.
+Numbers below come from `results/benchmark_20260328_080540.json` and `results/README_benchmark.md`.
 
 ### Memory (Mixtral-8x7B harness, CPU fallback)
 
@@ -40,33 +41,49 @@ Numbers below come from `results/benchmark_20260328_074849.json` and `results/RE
 |---|---:|---:|---:|
 | FP16 baseline | 256.0 | 1.0000 | 1.00x |
 | TurboQuant classic 3-bit path | 62.0 | 0.2422 | 4.13x |
-| TurboQuant adaptive path | 30.2 | 0.1178 | 8.49x |
+| TurboQuant adaptive path | 30.0 | 0.1170 | 8.54x |
 
 Measured adaptive KV points:
 
 | Seq Len | FP16 MB | Adaptive KV MB | Ratio | Compression |
 |---:|---:|---:|---:|
-| 1024 | 16.0 | 1.887 | 0.1179 | 8.48x |
-| 4096 | 64.0 | 7.524 | 0.1176 | 8.51x |
-| 16384 | 256.0 | 30.157 | 0.1178 | 8.49x |
+| 1024 | 16.0 | 1.870 | 0.1169 | 8.56x |
+| 4096 | 64.0 | 7.530 | 0.1177 | 8.50x |
+| 16384 | 256.0 | 29.960 | 0.1170 | 8.54x |
 
 ### Expert Cache Performance
 
 | gpu_cache_size | Hit Rate | Prefetch Readiness | Avg Load (ms) | GPU Saved (GB) | Hidden IO |
 |---:|---:|---:|---:|---:|---:|
-| 26 | 0.938 | 0.943 | 4.56 | 6.424 | 100% |
+| 26 | 0.968 | 0.968 | 0.69 | 6.424 | 100% |
 
-Source: `results/benchmark_20260328_074849.json` (`moe_expert` suite).
+Source: `results/benchmark_20260328_080540.json` (`moe_expert` suite).
 
 ### Inference Speed
 
 | Seq Len | Decode Latency (ms) | Throughput (tokens/sec) | IO-Bound Speedup (x) |
 |---:|---:|---:|---:|
-| 1024 | 78.78 | 13.0k | 8.52x |
-| 4096 | 362.73 | 11.3k | 8.50x |
-| 16384 | 1820.04 | 9.0k | 8.52x |
+| 1024 | 78.62 | 13.0k | 8.42x |
+| 4096 | 364.50 | 11.2k | 8.50x |
+| 16384 | 1697.43 | 9.7k | 8.51x |
 
-Predictor metrics from the same run: rolling accuracy `0.96`, precision@k `0.973`, recall@k `0.98`, mean latency `0.097 ms`, p99 `0.122 ms`, memory overhead `1.055 MB`.
+Predictor metrics from the same run: rolling accuracy `0.94`, precision@k `0.965`, recall@k `0.96`, mean latency `0.099 ms`, p99 `0.142 ms`, memory overhead `1.055 MB`.
+
+### Target+10% Scorecard
+
+| KPI | Required (+10%) | Current | Status |
+|---|---:|---:|---|
+| KV compression (real) | >= 6.05x | 8.53x | PASS |
+| Needle recall@1 (1k..128k) | 100% | 100% | PASS |
+| Retrieval/PPL degradation | < 0.5% | 0.0% | PASS |
+| MoE cache hit rate | >= 93.5% | 96.75% | PASS |
+| Avg expert load time | <= 27 ms | 0.69 ms | PASS |
+| GPU memory saved per layer | >= 5.5 GB | 6.42 GB | PASS |
+| Prefetch accuracy | >= 88% | 96.75% | PASS |
+| Predictor latency | < 0.27 ms | 0.099 ms | PASS |
+| Hidden IO latency | > 99% | 100% | PASS |
+| Decode throughput speedup (IO-bound) | >= 2.75x | 8.48x avg | PASS |
+| Latency spikes | < 50 ms | p99 = 8.92 ms | PASS |
 
 ## Quick Start
 
