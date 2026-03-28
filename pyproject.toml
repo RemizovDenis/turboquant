@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "turboquant-moe"
-version = "0.1.1"
+version = "0.1.2"
 description = "TurboQuant-MoE: KV-cache compression + MoE expert caching for efficient LLM inference."
 readme = "README.md"
 license = { text = "MIT" }

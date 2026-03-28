@@ -19,7 +19,7 @@ from turboquant.core.qjl import QJLResidualCorrector
 from turboquant.core.semantic_eviction import SemanticEvictionConfig, SemanticKVEviction
 from turboquant.core.turboquant import CacheEntry, TurboQuantConfig, TurboQuantKVCache
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 __all__ = [
     "PolarQuantizer",
