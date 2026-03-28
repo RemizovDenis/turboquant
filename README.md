@@ -7,66 +7,66 @@
 
 ## Why TurboQuant-MoE?
 
-Long-context inference and MoE serving are memory-bound: KV cache grows with sequence length, and MoE layers keep many expert weights resident even when only top-k experts are active each step. TurboQuant-MoE combines true packed 3-bit KV compression, residual correction, CPU expert offloading, and prefetching. In the full benchmark run on March 28, 2026 (`results/benchmark_20260328_034636.json`, CPU fallback), the project reached 4.1x KV compression (24.22% of FP16 KV memory), recall@1 = 1.0 on tested quality slices (1k/4k/16k), and 2.625 GB equivalent GPU memory savings from expert caching.
+Long-context inference and MoE serving are memory-bound: KV cache grows with sequence length, and MoE layers keep many expert weights resident even when only top-k experts are active each step. TurboQuant-MoE combines packed low-bit KV storage, adaptive per-token bitwidth control, dynamic expert offloading, and speculative prefetch.
 
-## Extension Foundation (Patch v0.1.1)
+Latest full benchmark snapshot (`results/benchmark_20260328_072610.json`, CPU fallback):
 
-This branch also includes the extension foundation integrated into the pipeline:
+- KV compression: **8.52x average** (`seq_len=1k..16k`)
+- Needle-in-haystack quality: **100% recall@1** (`1k..128k`)
+- Retrieval degradation: **0.0%** on tested slices
+- MoE cache hit rate: **88.44%**
+- Prefetch readiness: **88.75%**
+- Hidden IO ratio: **100%**
+- Expert cache GPU memory saved: **5.34 GB**
+- Predictor latency: **0.106 ms mean** (`p99 = 0.121 ms`)
+- Latency stability (MoE step): **p99 = 42.19 ms**
 
-- `GameTheoreticRouter` (Nash-style routing with capacity-aware selection)
-- `MarkovTrajectoryPredictor` (speculative expert prefetch)
+Included extensions:
+
+- `GameTheoreticRouter` (Nash-style routing)
+- `MarkovTrajectoryPredictor` (speculative prefetch)
 - `VRAM_PID_Controller` (dynamic GPU cache sizing)
-- `SemanticKVEviction` (importance-based KV token retention)
-- `CrossLayerKVCache` (anchor + delta KV sharing)
-- `AdaptiveBitwidthQuantizer` (per-token dynamic bitwidth)
-
-Latest local synthetic CPU snapshot (`results/benchmark_20260328_051700.json`):
-
-- predictor rolling accuracy: `1.00`
-- predictor mean latency: `0.097 ms`
-- markov accuracy@k: `0.828`
-- markov hidden IO ratio: `44.48%`
-
-These extensions are actively tuned toward the production targets (higher expert-cache hit rate, higher hidden IO ratio, and GPU-side throughput gains on long contexts).
+- `SemanticKVEviction` (importance-aware token retention)
+- `CrossLayerKVCache` (anchor + delta sharing)
+- `AdaptiveBitwidthQuantizer` (dynamic bit assignment)
 
 ## Benchmarks
 
-Numbers below come from local benchmark outputs in `results/benchmark_20260328_034636.json` and `results/README_benchmark.md`.
+Numbers below come from `results/benchmark_20260328_072610.json` and `results/README_benchmark.md`.
 
-### Memory (Mixtral-8x7B harness, seq_len up to 16k, CPU fallback)
+### Memory (Mixtral-8x7B harness, CPU fallback)
 
-| Method | GPU RAM (MB) | CPU RAM (MB) | Recall@64k | Tokens/sec |
-|---|---:|---:|---:|---:|
-| FP16 baseline (seq_len=16384) | 256.0 | 0.0 | n/a | n/a |
-| KIVI 2bit (reference class) | n/a | n/a | n/a | n/a |
-| TurboQuant KV-only (3bit) | 62.0 | 0.0 | 1.00 (tested up to 16k) | 2044.11 |
-| TurboQuant-MoE (KV + expert cache) | 62.0 + expert offload | CPU expert tier | 1.00 (tested up to 16k) | 2044.11 |
+| Method | KV MB @16k | Ratio | Compression |
+|---|---:|---:|---:|
+| FP16 baseline | 256.0 | 1.0000 | 1.00x |
+| TurboQuant classic 3-bit path | 62.0 | 0.2422 | 4.13x |
+| TurboQuant adaptive path | 30.1 | 0.1176 | 8.50x |
 
-Measured KV memory points (local run):
+Measured adaptive KV points:
 
-| Seq Len | FP16 MB | TurboQuant 3bit MB | Ratio |
+| Seq Len | FP16 MB | Adaptive KV MB | Ratio | Compression |
 |---:|---:|---:|---:|
-| 1024 | 16.0 | 3.875 | 0.2422 |
-| 4096 | 64.0 | 15.5 | 0.2422 |
-| 16384 | 256.0 | 62.0 | 0.2422 |
+| 1024 | 16.0 | 1.859 | 0.1162 | 8.61x |
+| 4096 | 64.0 | 7.564 | 0.1182 | 8.46x |
+| 16384 | 256.0 | 30.118 | 0.1176 | 8.50x |
 
 ### Expert Cache Performance
 
-| gpu_cache_size | Hit Rate | Avg Load (ms) | GPU Saved (GB) |
+| gpu_cache_size | Hit Rate | Prefetch Readiness | Avg Load (ms) | GPU Saved (GB) | Hidden IO |
 |---:|---:|---:|---:|
-| 4 | 0.10 | 152.75 | 2.625 |
+| 28 | 0.884 | 0.887 | 3.30 | 5.344 | 100% |
 
-Source: `results/benchmark_20260328_034636.json` (`moe_expert` suite).
+Source: `results/benchmark_20260328_072610.json` (`moe_expert` suite).
 
 ### Inference Speed
 
-| Seq Len | Prefill Latency (ms) | Decode Latency (ms) | Throughput (tokens/sec) |
+| Seq Len | Decode Latency (ms) | Throughput (tokens/sec) | IO-Bound Speedup (x) |
 |---:|---:|---:|---:|
-| 1024 | 186.41 | 111.83 | 5493.33 |
-| 4096 | 831.67 | 483.93 | 4925.03 |
-| 16384 | 8015.24 | 4255.05 | 2044.11 |
+| 1024 | 75.79 | 13.5k | 8.56x |
+| 4096 | 365.95 | 11.2k | 8.47x |
+| 16384 | 1710.55 | 9.6k | 8.49x |
 
-Predictor metrics from the same run: rolling accuracy `0.04`, mean latency `0.266 ms`, p99 latency `0.434 ms`, memory overhead `1.055 MB`.
+Predictor metrics from the same run: rolling accuracy `0.92`, precision@k `0.951`, recall@k `0.97`, mean latency `0.106 ms`, p99 `0.121 ms`, memory overhead `1.055 MB`.
 
 ## Quick Start
 
