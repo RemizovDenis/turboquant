@@ -6,6 +6,7 @@ import json
 import threading
 import time
 from collections.abc import Iterable
+from contextlib import suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -352,10 +353,15 @@ class TurboQuantMoE:
             before = self._total_saved_mb_fast()
 
             predicted_experts: list[int] = []
+            predicted_prefetch_future = None
             if self.predictor is not None and self.config.enable_expert_prediction:
                 predicted_experts = self.predictor.predict_experts(hidden_states, layer_id)
                 if predicted_experts:
-                    self.expert_cache.prefetch_experts(predicted_experts, layer_id, priority=1.0)
+                    predicted_prefetch_future = self.expert_cache.prefetch_experts(
+                        predicted_experts,
+                        layer_id,
+                        priority=1.0,
+                    )
 
             if isinstance(self.router, GameTheoreticRouter):
                 locations = torch.zeros(
@@ -375,6 +381,17 @@ class TurboQuantMoE:
                 router_out = self.router(router_logits=router_logits, training=False)
             active_experts = sorted({int(x) for x in router_out.expert_indices.flatten().tolist()})
 
+            markov_ready: list[int] = []
+            if self.markov_predictor is not None:
+                markov_ready = self.markov_predictor.wait_for_layer(
+                    layer_id=layer_id,
+                    timeout_ms=self.markov_predictor.config.wait_timeout_ms,
+                )
+
+            if predicted_prefetch_future is not None:
+                with suppress(Exception):
+                    predicted_prefetch_future.result(timeout=0.001)
+
             for expert_id in active_experts:
                 try:
                     self.expert_cache.get_expert(expert_id=expert_id, layer_id=layer_id)
@@ -386,13 +403,14 @@ class TurboQuantMoE:
                 if pid_state.current_utilization > self.pid_controller.config.emergency_threshold:
                     self.pid_controller.emergency_evict()
 
-            markov_prefetch: list[int] = []
+            markov_prefetch: list[int] = markov_ready
             if self.markov_predictor is not None and active_experts:
                 future = self.markov_predictor.predict(layer_id, active_experts)
                 self.markov_predictor.start_prefetch(future)
                 self.markov_predictor.on_layer_complete(layer_id, active_experts)
                 markov_prefetch = sorted(
-                    {expert_id for pred in future.values() for expert_id in pred.expert_ids}
+                    set(markov_ready)
+                    | {expert_id for pred in future.values() for expert_id in pred.expert_ids}
                 )
 
             entropy: torch.Tensor | None = None

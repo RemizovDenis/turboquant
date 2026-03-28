@@ -40,6 +40,10 @@ class MarkovPrefetchConfig:
     prefetch_threshold: float = 0.25
     min_prefetch_prob: float = 0.1
     prefetch_priority_decay: float = 0.7
+    uncertainty_topk_boost: int = 2
+    per_source_topk: int = 1
+    max_prefetch_per_layer: int = 0
+    wait_timeout_ms: float = 0.25
     async_transfer_streams: int = 2
     max_pending_prefetches: int = 16
     device: str = "cuda"
@@ -52,6 +56,7 @@ class PrefetchPrediction:
     layer_id: int
     expert_ids: list[int]
     probabilities: list[float]
+    horizon: int
     confidence: float
     prefetch_started: bool
     estimated_load_ms: float
@@ -175,8 +180,21 @@ class MarkovTrajectoryPredictor(nn.Module):
                     break
 
                 probs = probs @ matrix[transition_layer]
-                probs = probs * (self.config.prefetch_priority_decay**step)
                 probs = probs / probs.sum().clamp_min(1e-8)
+
+                entropy = float(
+                    -(probs * torch.log(probs.clamp_min(1e-8))).sum().item()
+                    / math.log(self.config.num_experts)
+                )
+                confidence = 1.0 - max(0.0, min(1.0, entropy))
+                dyn_topk = min(
+                    self.config.num_experts,
+                    max(
+                        self.config.top_k_experts,
+                        self.config.top_k_experts
+                        + int(round(entropy * max(0, self.config.uncertainty_topk_boost))),
+                    ),
+                )
 
                 candidate = torch.nonzero(
                     probs >= float(self.config.min_prefetch_prob), as_tuple=False
@@ -184,26 +202,36 @@ class MarkovTrajectoryPredictor(nn.Module):
                 if candidate.numel() == 0:
                     top_vals, top_idx = torch.topk(
                         probs,
-                        k=min(self.config.top_k_experts, self.config.num_experts),
+                        k=dyn_topk,
                     )
-                    chosen_idx = top_idx
-                    chosen_probs = top_vals
+                    chosen_ids = [int(x) for x in top_idx.tolist()]
                 else:
                     cand_probs = probs[candidate]
                     order = torch.argsort(cand_probs, descending=True)
-                    top_n = min(self.config.top_k_experts, int(order.numel()))
-                    chosen_idx = candidate[order[:top_n]]
-                    chosen_probs = cand_probs[order[:top_n]]
+                    top_n = min(dyn_topk, int(order.numel()))
+                    chosen_ids = [int(x) for x in candidate[order[:top_n]].tolist()]
 
-                entropy = float(
-                    -(probs * torch.log(probs.clamp_min(1e-8))).sum().item()
-                    / math.log(self.config.num_experts)
-                )
-                confidence = 1.0 - max(0.0, min(1.0, entropy))
+                if self.config.per_source_topk > 0:
+                    extra_ids: set[int] = set()
+                    src_topk = min(self.config.num_experts, self.config.per_source_topk)
+                    for src in unique_active:
+                        row = matrix[transition_layer, src]
+                        src_top = torch.topk(row, k=src_topk).indices.tolist()
+                        extra_ids.update(int(x) for x in src_top)
+                    merged = sorted(
+                        set(chosen_ids) | extra_ids,
+                        key=lambda expert_id: float(probs[expert_id].item()),
+                        reverse=True,
+                    )
+                    max_ids = min(self.config.num_experts, dyn_topk + self.config.per_source_topk)
+                    chosen_ids = merged[:max_ids]
+
+                chosen_probs = [float(probs[idx].item()) for idx in chosen_ids]
                 prediction = PrefetchPrediction(
                     layer_id=future_layer,
-                    expert_ids=[int(x) for x in chosen_idx.tolist()],
-                    probabilities=[float(x) for x in chosen_probs.tolist()],
+                    expert_ids=chosen_ids,
+                    probabilities=chosen_probs,
+                    horizon=step,
                     confidence=confidence,
                     prefetch_started=False,
                     estimated_load_ms=float(self.expert_cache.stats().avg_load_time_ms),
@@ -227,33 +255,104 @@ class MarkovTrajectoryPredictor(nn.Module):
         Args:
             predictions: Predictions produced by :meth:`predict`.
         """
+        if not predictions:
+            return
+
+        layer_scores: dict[int, dict[int, float]] = defaultdict(dict)
+        layer_preds: dict[int, list[PrefetchPrediction]] = defaultdict(list)
+        layer_horizons: dict[int, dict[int, int]] = defaultdict(dict)
+        for layer_id, pred in predictions.items():
+            if not pred.expert_ids:
+                continue
+            max_prob = max(pred.probabilities, default=0.0)
+            confidence_ok = pred.confidence >= self.config.prefetch_threshold
+            probability_ok = max_prob >= max(
+                self.config.min_prefetch_prob,
+                self.config.prefetch_threshold,
+            )
+            if not confidence_ok and not probability_ok:
+                continue
+            layer_preds[layer_id].append(pred)
+            for expert_id, prob in zip(pred.expert_ids, pred.probabilities, strict=True):
+                effective_confidence = max(pred.confidence, self.config.prefetch_threshold, 0.05)
+                score = max(
+                    0.0,
+                    float(prob)
+                    * effective_confidence
+                    * (self.config.prefetch_priority_decay ** max(0, pred.horizon - 1)),
+                )
+                prev = layer_scores[layer_id].get(int(expert_id), 0.0)
+                if score >= prev:
+                    layer_scores[layer_id][int(expert_id)] = score
+                horizon_prev = layer_horizons[layer_id].get(int(expert_id), pred.horizon)
+                layer_horizons[layer_id][int(expert_id)] = min(horizon_prev, pred.horizon)
+
+        if not layer_scores:
+            return
+
+        per_layer_limit = (
+            self.config.max_prefetch_per_layer
+            if self.config.max_prefetch_per_layer > 0
+            else max(self.config.top_k_experts * 2, self.config.top_k_experts)
+        )
+
         with self._lock:
-            for layer_id, pred in predictions.items():
-                if pred.confidence < self.config.prefetch_threshold:
-                    continue
-                for expert_id in pred.expert_ids:
+            budget = self.config.max_pending_prefetches - len(self.pending_prefetches)
+            if budget <= 0:
+                return
+
+            layer_ready: dict[int, set[int]] = defaultdict(set)
+            layer_selected: dict[int, list[int]] = defaultdict(list)
+            ranked_global: list[tuple[float, int, int, int]] = []
+
+            for layer_id, scores in layer_scores.items():
+                for expert_id, score in scores.items():
                     key = (layer_id, expert_id)
                     if key in self.expert_cache._gpu_experts:
+                        layer_ready[layer_id].add(expert_id)
                         continue
                     if key in self.pending_prefetches:
                         continue
-                    if len(self.pending_prefetches) >= self.config.max_pending_prefetches:
-                        return
-                    priority = max(
-                        0.1,
-                        pred.confidence
-                        * (
-                            self.config.prefetch_priority_decay
-                            ** max(0, layer_id - pred.layer_id + 1)
-                        ),
+                    horizon = layer_horizons[layer_id].get(expert_id, self.config.lookahead_steps)
+                    ranked_global.append((float(score), -int(horizon), layer_id, expert_id))
+
+            ranked_global.sort(key=lambda item: (item[0], item[1]), reverse=True)
+
+            for score, _, layer_id, expert_id in ranked_global:
+                if budget <= 0:
+                    break
+                if len(layer_selected[layer_id]) >= per_layer_limit:
+                    continue
+                key = (layer_id, expert_id)
+                if key in self.pending_prefetches or key in self.expert_cache._gpu_experts:
+                    continue
+                if score <= 0.0:
+                    continue
+                layer_selected[layer_id].append(expert_id)
+                budget -= 1
+
+            for layer_id in sorted(layer_scores):
+                selected = layer_selected.get(layer_id, [])
+                ready_set = layer_ready.get(layer_id, set())
+                if not selected and not ready_set:
+                    continue
+
+                if selected:
+                    top_score = max(
+                        layer_scores[layer_id].get(expert_id, 0.0) for expert_id in selected
                     )
                     fut = self.expert_cache.prefetch_experts(
-                        expert_ids=[expert_id],
+                        expert_ids=selected,
                         layer_id=layer_id,
-                        priority=priority,
+                        priority=max(0.1, top_score),
                     )
-                    self.pending_prefetches[key] = fut
-                    pred.prefetch_started = True
+                    for expert_id in selected:
+                        self.pending_prefetches[(layer_id, expert_id)] = fut
+
+                selected_set = set(selected)
+                for pred in layer_preds[layer_id]:
+                    if set(pred.expert_ids) & (selected_set | ready_set):
+                        pred.prefetch_started = True
 
     def on_layer_complete(self, layer_id: int, actual_experts: list[int]) -> None:
         """Update transitions and prediction accuracy when a layer completes.
@@ -278,13 +377,21 @@ class MarkovTrajectoryPredictor(nn.Module):
             preds = self._prediction_cache.pop(layer_id, [])
             if preds:
                 actual_set = set(actual)
-                avg_load = float(self.expert_cache.stats().avg_load_time_ms)
+                cache_stats = self.expert_cache.stats()
+                avg_load = float(cache_stats.avg_load_time_ms)
+                cpu_load = (
+                    float(cache_stats.avg_cpu_load_time_ms)
+                    if cache_stats.avg_cpu_load_time_ms > 0.0
+                    else avg_load
+                )
                 for step, pred in preds:
                     predicted_set = set(pred.expert_ids)
-                    if predicted_set & actual_set:
+                    overlap_count = len(predicted_set & actual_set)
+                    if overlap_count > 0:
                         self._correct_predictions += 1
                         self._lookahead_hits[step] += 1
-                        self._io_latency_hidden_ms += avg_load
+                        if pred.prefetch_started:
+                            self._io_latency_hidden_ms += cpu_load * float(overlap_count)
                     if pred.expert_ids and pred.expert_ids[0] in actual_set:
                         self._correct_at_1 += 1
 

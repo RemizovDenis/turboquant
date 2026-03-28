@@ -32,6 +32,8 @@ htmlcov/
 
 # Benchmark results (generated)
 benchmark_results/
+results/benchmark_*.json
+results/report_*.html
 
 # Calibration files
 *.safetensors
