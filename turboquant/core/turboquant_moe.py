@@ -346,7 +346,7 @@ class TurboQuantMoE:
         """Execute one MoE step: prediction, routing, expert load, KV compression."""
         with self._lock:
             t_start = time.perf_counter()
-            before = self.memory_report().total_saved_mb
+            before = self._total_saved_mb_fast()
 
             predicted_experts: list[int] = []
             if self.predictor is not None and self.config.enable_expert_prediction:
@@ -425,7 +425,7 @@ class TurboQuantMoE:
                     self.predictor.online_update(hidden_states, layer_id, active_experts)
 
             latency_ms = (time.perf_counter() - t_start) * 1000.0
-            after = self.memory_report().total_saved_mb
+            after = self._total_saved_mb_fast()
             prediction_union = set(predicted_experts) | set(markov_prefetch)
             prediction_ok = set(active_experts).issubset(prediction_union)
 
@@ -467,13 +467,7 @@ class TurboQuantMoE:
 
     def memory_report(self) -> MemoryReport:
         """Collect current memory report across all managed components."""
-        dummy = torch.zeros(
-            (1, self.config.kv_config.num_heads, 1, self.config.kv_config.head_dim),
-            dtype=torch.float16,
-            device=self.kv_cache.device,
-        )
-        entry = self.kv_cache.compress(dummy, dummy)
-        kv_mem = self.kv_cache.memory_usage(entry)
+        kv_mem = self.kv_cache.latest_memory_usage()
 
         ex_stats = self.expert_cache.stats()
         expert_baseline = ex_stats.gpu_memory_used_mb + ex_stats.gpu_memory_saved_mb
@@ -498,6 +492,11 @@ class TurboQuantMoE:
             expert_hit_rate=ex_stats.hit_rate,
             prefetch_accuracy=ex_stats.avg_prefetch_accuracy,
         )
+
+    def _total_saved_mb_fast(self) -> float:
+        kv_mem = self.kv_cache.latest_memory_usage()
+        ex_stats = self.expert_cache.stats()
+        return (kv_mem["fp16_baseline_mb"] - kv_mem["total_mb"]) + ex_stats.gpu_memory_saved_mb
 
     def benchmark(
         self,

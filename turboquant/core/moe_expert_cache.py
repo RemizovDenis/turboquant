@@ -633,8 +633,6 @@ class DynamicExpertCache:
         self._gpu_experts.discard(key)
         self._lru.pop(key, None)
         self._lfu.pop(key, None)
-        if self.device.type == "cuda" and torch.cuda.is_available():
-            torch.cuda.empty_cache()
         self._refresh_memory_stats_locked()
 
     def _update_stats(self, load_ms: float, gpu_hit: bool, cpu_hit: bool, miss: bool) -> None:

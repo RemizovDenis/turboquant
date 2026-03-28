@@ -139,6 +139,7 @@ class TurboQuantKVCache:
         self.cross_layer_cache: CrossLayerKVCache | None = None
         self.adaptive_quantizer: AdaptiveBitwidthQuantizer | None = None
         self._cross_base_cache: TurboQuantKVCache | None = None
+        self._last_memory_usage: dict[str, float] | None = None
 
         if config.enable_semantic_eviction:
             from turboquant.core.semantic_eviction import (
@@ -314,6 +315,7 @@ class TurboQuantKVCache:
                 }
 
             mem = self.memory_usage(entry)
+            self._last_memory_usage = dict(mem)
             log.info(
                 "compress",
                 compression_ratio=mem["compression_ratio"],
@@ -478,6 +480,29 @@ class TurboQuantKVCache:
             "mb": total_bytes / (1024**2),
             "ratio": ratio,
         }
+
+    def latest_memory_usage(self) -> dict[str, float]:
+        """Return last computed memory report without triggering recompression."""
+        with self._lock:
+            if self._last_memory_usage is not None:
+                return dict(self._last_memory_usage)
+
+            shape = [1, self.config.num_heads, 1, self.config.head_dim]
+            fp16_baseline_bytes = int(np.prod(shape)) * 2 * 2
+            fp16_baseline_mb = fp16_baseline_bytes / (1024**2)
+            return {
+                "kv_compressed_bytes": float(fp16_baseline_bytes),
+                "residual_bytes": 0.0,
+                "scales_bytes": 0.0,
+                "total_bytes": float(fp16_baseline_bytes),
+                "total_mb": fp16_baseline_mb,
+                "fp16_baseline_mb": fp16_baseline_mb,
+                "compression_ratio": 1.0,
+                "actual_savings_percent": 0.0,
+                "bytes": float(fp16_baseline_bytes),
+                "mb": fp16_baseline_mb,
+                "ratio": 1.0,
+            }
 
     def benchmark(
         self,
