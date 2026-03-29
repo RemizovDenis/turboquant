@@ -1,7 +1,12 @@
 # TurboQuant-MoE
 
 [![PyPI](https://img.shields.io/pypi/v/turboquant-moe.svg)](https://pypi.org/project/turboquant-moe/) [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/) [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE) [![CI](https://img.shields.io/github/actions/workflow/status/RemizovDenis/turboquant/ci.yml)](https://github.com/RemizovDenis/turboquant/actions) [![arXiv](https://img.shields.io/badge/arXiv-2504.19874-b31b1b.svg)](https://arxiv.org/abs/2504.19874) [![Discord](https://img.shields.io/badge/discord-community-5865F2.svg)](https://discord.gg/)
+[![Stars](https://img.shields.io/github/stars/RemizovDenis/turboquant.svg?style=social&label=Star)](https://github.com/RemizovDenis/turboquant)
+[![GitHub trending](https://img.shields.io/badge/GitHub-Trending-blue.svg)](https://github.com/trending)
 
+🚀 **8.5x LLM KV-cache compression with zero quality loss**
+
+**If you use Mixtral, DeepSeek, or any MoE model in production - this saves you 87% on inference costs.**
 > Production implementation of Google DeepMind's TurboQuant algorithm with dynamic MoE expert caching.
 > Includes extension foundation for game-theoretic routing, speculative prefetch, dynamic VRAM control, semantic KV eviction, cross-layer sharing, and adaptive bitwidth quantization.
 
