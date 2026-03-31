@@ -103,6 +103,8 @@ class CrossLayerKVCache:
         layer_id: int,
         keys: torch.Tensor,
         values: torch.Tensor,
+        token_ids: torch.Tensor | None = None,
+        attention_entropy: torch.Tensor | None = None,
     ) -> CrossLayerCacheEntry:
         """Compress KV for a layer as anchor or delta.
 
@@ -110,6 +112,8 @@ class CrossLayerKVCache:
             layer_id: Layer index.
             keys: Key tensor `[batch, heads, seq, dim]`.
             values: Value tensor `[batch, heads, seq, dim]`.
+            token_ids: Optional token IDs for adaptive classification.
+            attention_entropy: Optional attention entropy for adaptive bitwidth.
 
         Returns:
             :class:`CrossLayerCacheEntry` for the layer.
@@ -119,7 +123,9 @@ class CrossLayerKVCache:
             original_shape = list(keys.shape)
 
             if layer_id == anchor_layer or anchor_layer not in self.anchor_entries:
-                anchor_entry = self.base_quantizer.compress(keys, values)
+                anchor_entry = self.base_quantizer.compress(
+                    keys, values, token_ids=token_ids, attention_entropy=attention_entropy
+                )
                 metadata: dict[str, Any] = {
                     "original_shape": original_shape,
                     "fallback_anchor": False,
@@ -298,27 +304,28 @@ class CrossLayerKVCache:
 
                 if entry.is_anchor and entry.anchor_entry is not None:
                     mem = self.base_quantizer.memory_usage(entry.anchor_entry)
-                    layer_mb = float(mem["total_mb"])
-                    report[f"layer_{layer_id}_anchor_mb"] = layer_mb
+                    layer_bytes = float(mem["total_bytes"])
+                    report[f"layer_{layer_id}_anchor_mb"] = layer_bytes / (1024**2)
                 else:
-                    delta_bytes = 0
+                    layer_bytes = 0.0
                     if entry.delta_packed is not None:
-                        delta_bytes += int(
+                        layer_bytes += float(
                             entry.delta_packed.numel() * entry.delta_packed.element_size()
                         )
                     if entry.delta_scales is not None:
-                        delta_bytes += int(
+                        layer_bytes += float(
                             entry.delta_scales.numel() * entry.delta_scales.element_size()
                         )
-                    layer_mb = delta_bytes / (1024**2)
-                    report[f"layer_{layer_id}_delta_mb"] = layer_mb
+                    report[f"layer_{layer_id}_delta_mb"] = layer_bytes / (1024**2)
+
+                layer_mb = layer_bytes / (1024**2)
                 report[f"layer_{layer_id}_total_mb"] = layer_mb
                 report[f"layer_{layer_id}_vs_baseline_mb"] = layer_baseline
                 total_mb += layer_mb
 
             report["total_mb"] = total_mb
             report["baseline_mb"] = baseline_mb
-            report["total_compression_ratio"] = total_mb / max(1e-8, baseline_mb)
+            report["total_compression_ratio"] = baseline_mb / max(1e-8, total_mb)
             return report
 
     def warmup(self, sample_keys: list[torch.Tensor], sample_values: list[torch.Tensor]) -> None:

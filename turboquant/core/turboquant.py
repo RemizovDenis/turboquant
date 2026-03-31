@@ -17,7 +17,12 @@ import structlog
 import torch
 import torch.nn.functional as F  # noqa: N812
 
-from turboquant.core.polar_quant import PolarQuantizer
+from turboquant.core.adaptive_bitwidth import (
+    AdaptiveBitwithConfig,
+    AdaptiveBitwidthQuantizer,
+    AdaptiveCompressedCache,
+)
+from turboquant.core.polar_quant import PolarQuantConfig, PolarQuantizer
 from turboquant.core.qjl import QJLResidualCorrector
 
 log = structlog.get_logger(__name__)
@@ -121,6 +126,12 @@ class TurboQuantKVCache:
                 head_dim=config.head_dim, sketch_dim=config.sketch_dim, seed=config.seed + 1
             ).to(self.device)
 
+        self.adaptive = None
+        if config.enable_adaptive_bitwidth and config.adaptive_bitwidth_config is not None:
+            self.adaptive = AdaptiveBitwidthQuantizer(
+                config.adaptive_bitwidth_config
+            )
+
         log.info("TurboQuantKVCache.init", config=config)
 
         # Optional benchmark on init
@@ -145,12 +156,13 @@ class TurboQuantKVCache:
         self,
         keys: torch.Tensor,
         values: torch.Tensor,
-        layer_id: int | None = None,
         token_ids: torch.Tensor | None = None,
         attention_entropy: torch.Tensor | None = None,
-    ) -> CacheEntry:
-        """Compress keys/values with true packed 3-bit + QJL residual."""
-        del layer_id, token_ids, attention_entropy  # Metadata handled in v0.3.0
+    ) -> CacheEntry | AdaptiveCompressedCache:
+        """Compress keys/values with true packed 3-bit, optionally adaptive."""
+        if self.config.enable_adaptive_bitwidth and self.adaptive is not None:
+            return self.adaptive.compress(keys, values, token_ids, attention_entropy)
+
         with self._lock:
             k, v = keys.to(self.device), values.to(self.device)
             bs, heads, seq, dim = k.shape
@@ -207,8 +219,15 @@ class TurboQuantKVCache:
         with torch.cuda.stream(stream) if stream else contextlib.nullcontext():
             return self.compress(keys, values)
 
-    def decompress(self, entry: CacheEntry) -> tuple[torch.Tensor, torch.Tensor]:
+    def decompress(
+        self, entry: CacheEntry | AdaptiveCompressedCache
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Decompress back to float16."""
+        from turboquant.core.adaptive_bitwidth import AdaptiveCompressedCache
+
+        if isinstance(entry, AdaptiveCompressedCache) and self.adaptive is not None:
+            return self.adaptive.decompress(entry, entry.original_shape)
+
         with self._lock:
             entry.access_count += 1
 
@@ -235,8 +254,25 @@ class TurboQuantKVCache:
 
             return k, v
 
-    def memory_usage(self, entry: CacheEntry) -> dict[str, float]:
+    def memory_usage(self, entry: CacheEntry | AdaptiveCompressedCache) -> dict[str, float]:
         """Memory report considering true packed storage."""
+        from turboquant.core.adaptive_bitwidth import AdaptiveCompressedCache
+
+        if isinstance(entry, AdaptiveCompressedCache):
+            # For adaptive, we use the pre-calculated assignment metrics
+            # bytes = (tokens * heads * dim * bits) / 8
+            num_elements = (
+                entry.assignment.token_indices.numel()
+                * self.config.num_heads
+                * self.config.head_dim
+            )
+            # Multiply by 2 because entry contains both Key and Value components
+            total_bytes = float(entry.assignment.avg_bits * num_elements * 2 / 8)
+            return {
+                "total_bytes": total_bytes,
+                "avg_bits": entry.assignment.avg_bits,
+                "compression_ratio": entry.assignment.estimated_compression_ratio,
+            }
 
         def nbytes(t: torch.Tensor | None) -> int:
             return t.nbytes if t is not None else 0
