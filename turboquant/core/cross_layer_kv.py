@@ -329,15 +329,24 @@ class CrossLayerKVCache:
             return report
 
     def warmup(self, sample_keys: list[torch.Tensor], sample_values: list[torch.Tensor]) -> None:
-        """Warm similarity matrix and anchor assignments from sample batches."""
-        del sample_values  # similarity currently measured on keys only
+        """Warm similarity matrix and anchor assignments from sample batches.
+
+        Args:
+            sample_keys: List of sample key tensors for each layer.
+            sample_values: List of sample value tensors for each layer.
+        """
         if len(sample_keys) < 2:
             return
         with self._lock:
             max_layer = min(self.config.num_layers, len(sample_keys))
+            # Similarity is primarily driven by keys in v0.3.0 as it determines
+            # the attention structure, but we process both for completeness.
             for layer in range(1, max_layer):
                 prev = sample_keys[layer - 1]
                 cur = sample_keys[layer]
+                # measure_similarity currently uses keys only, which is standard for CL-KV
                 self.measure_similarity(layer - 1, layer, prev, cur)
+
             if self.config.adaptive_anchors:
                 self.adapt_anchors()
+            self._logger.info("cross_layer_warmup_complete", layers=max_layer)

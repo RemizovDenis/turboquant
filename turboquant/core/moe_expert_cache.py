@@ -214,6 +214,10 @@ class DynamicExpertCache:
         self._misses = 0
         self._load_time_sum = 0.0
 
-    def warmup(self, history: Any) -> None:
-        """Optional warmup step."""
-        pass
+    def warmup(self, history: list[tuple[int, int]]) -> None:
+        """Warmup the expert cache with a list of (layer_id, expert_id)."""
+        with self._lock:
+            for layer_id, expert_id in history:
+                if (layer_id, expert_id) in self._cpu_experts:
+                    self.prefetch(expert_id, layer_id)
+            log.info("expert_cache.warmup_complete", history_len=len(history))
