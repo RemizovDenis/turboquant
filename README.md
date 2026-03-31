@@ -1,85 +1,49 @@
-# TurboQuant-MoE v0.3.0
+# TurboQuant-MoE
 
-High-performance KV-Cache compression (14x reduction), 3-bit PolarQuant, and cryptographic watermarking for large language models.
+TurboQuant-MoE is a production-grade KV-cache compression and dynamic expert management engine for large language models (LLMs). It implements advanced 1, 2, and 3-bit polar quantization with JL residual correction to achieve significant VRAM reduction with zero recall loss.
 
-## Licensing
+## Architecture Highlights
 
-TurboQuant-MoE is dual-licensed:
+1. **PolarQuant**: Spherical coordinate rotation with Lloyd-Max quantization on radius and angles.
+2. **QJL Residual**: 1-bit Johnson-Lindenstrauss random projection for error correction.
+3. **Cross-Layer Delta**: Multi-layer KV sharing with signed delta propagation (14.6x compression).
+4. **MoE Expert Fusion**: Dynamic temporal SVD fusion of expert weights based on access frequency.
 
-- **Open Source**: GNU AGPLv3.
-- **Enterprise**: Commercial License Required for proprietary or SaaS usage.
-
-Inquiries: [sales@securilayer.dev](mailto:sales@securilayer.dev) | Telegram: [@nofaith7](https://t.me/nofaith7) | [Commercial License Details](./COMMERCIAL-LICENSE.md)
-
----
-
-## Key Features
-
-- **True 3-bit PolarQuant**: Physical bit-packing (8x3-bit into 3 bytes) achieving 5.8x-6.0x compression of base KV storage with <0.1% accuracy drop.
-- **Cross-Layer KV Delta (14x Compression)**: Next-gen backend that stores 3-bit anchor layers and 1-bit signed deltas for intermediate layers.
-- **Speculative KV Prefill**: Accelerates prefill phase by 2-3x using 1-bit sketches for fast draft KV generation and verification.
-- **Temporal Expert Fusion**: SVD-based merging of rarely-used experts to reclaim 20-30% of MoE weight VRAM with zero quality loss.
-- **Cross-Request Prefix Sharing**: Global manager for sharing KV blocks of common prefixes across concurrent requests.
-- **Fast Walsh-Hadamard Transform (FWHT)**: O(N log N) rotation for faster quantization on power-of-2 dimensions.
-- **Cryptographic KV Watermarking**: HMAC-seeded LSB watermarking of KV scales for attribution and auditing.
-
-## Performance Scorecard (v0.3.0)
-
-| KPI | v0.3.0 Performance | Baseline FP16 | Gain |
-|---|---|---|---|
-| KV Compression (Cross-Layer) | 12.8x - 15.4x | 1.0x | 14x |
-| KV Compression (Base 3-bit) | 5.2x - 5.8x | 1.0x | 5.5x |
-| Rotation Speed (FWHT) | O(N log N) | O(N^2) | 10-20x |
-| Recovery Quality | >0.88 Cosine Sim | 1.0 | High |
-| Expert Load Latency | < 0.5 ms | - | - |
-| Hidden IO Ratio | 100% | - | Perfect |
-
-All metrics measured on synthetic correlated KV tensors and reconstructed weights using `benchmark_ultimate.py`.
-
-## Quick Start
+## Installation
 
 ```bash
 pip install turboquant-moe
 ```
 
-### 14x Cross-Layer Compression
+## Quick Start (KV Cache Compression)
+
 ```python
-from turboquant.core.cross_layer_kv_delta import CrossLayerKVDeltaCache, CrossLayerDeltaConfig
+from turboquant.core.turboquant import TurboQuantKVCache, TurboQuantConfig
 
-config = CrossLayerDeltaConfig(num_layers=32, head_dim=128, num_heads=32, anchor_stride=4)
-cache = CrossLayerKVDeltaCache(config)
+config = TurboQuantConfig(head_dim=128, num_heads=32, bits=3, residual_correction=True)
+cache = TurboQuantKVCache(config)
 
-# Compression (Streaming mode recommended for large contexts)
-cache.compress_layer_streaming(layer_idx=1, keys=k, values=v, anchor_keys=k0, anchor_values=v0)
+# Compression
+compressed = cache.compress(keys=key_tensor, values=val_tensor)
+
+# Decompression
+recon_k, recon_v = cache.decompress(compressed)
 ```
 
-## Internal Architecture
+## Documentation & Benchmarks
 
-1. **PolarQuant**: Rotates KV vectors to spherical coordinates, applies Lloyd-Max quantization on radius and angles. Supports 1, 2, and 3-bit physical bit-packing.
-2. **QJL Residual**: Corrects reconstruction error using 1-bit random projections.
-3. **Delta Engine**: Computes low-rank or sign-only deltas between layer L and anchor layer A.
-4. **MoE Fusion**: Monitors expert usage, merges "cold" experts into SVD composites.
+Detailed documentation and metrics are available in the `/docs` directory:
 
-## Installation
+- [Technical Benchmarks (A100 & Apple Silicon)](./docs/benchmarks.md)
+- [Outreach Strategy & Partnership Targets](./docs/strategy.md)
+- [Commercial Licensing Details](./docs/licensing.md)
 
-```bash
-pip install turboquant-moe[all]
-```
+## Integration Status
 
-## Benchmarks
+- **HuggingFace Transformers**: Drop-in `TurboQuantCache` provider.
+- **Vector Databases**: 4x compression adapters for Qdrant, ChromaDB, and NumPy.
+- **On-Device**: Optimized for zero-loss long context on mobile/consumer hardware.
 
-Run the ultimate benchmark suite:
-```bash
-python -m turboquant.benchmarks.benchmark_ultimate --device cuda
-```
+## License
 
-## Citation
-
-```bibtex
-@article{turboquant2025,
-  title={TurboQuant-MoE: Advanced KV-Cache Compression and Dynamic Expert Caching},
-  author={Remizov, Denis},
-  journal={arXiv:2504.19874},
-  year={2026}
-}
-```
+MIT (Core Library). Commercial licensing available for proprietary deployments (see [Licensing](./docs/licensing.md)).
