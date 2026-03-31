@@ -20,6 +20,7 @@ from turboquant.core.turboquant import CacheEntry, TurboQuantConfig, TurboQuantK
 
 log = structlog.get_logger(__name__)
 
+
 @dataclass
 class CrossLayerDeltaConfig:
     """Configuration for cross-layer compression."""
@@ -32,6 +33,7 @@ class CrossLayerDeltaConfig:
     delta_sketch_dim: int | None = None  # None -> head_dim // 8
     similarity_threshold: float = 0.70
     device: str = "cpu"
+
 
 @dataclass
 class LayerKVEntry:
@@ -47,6 +49,7 @@ class LayerKVEntry:
     delta_value_norms: torch.Tensor | None = None
     layer_similarity: float = 1.0
     used_delta: bool = False
+
 
 class CrossLayerKVDeltaCache:
     """Exploits inter-layer KV similarity for 11-14x compression."""
@@ -113,9 +116,7 @@ class CrossLayerKVDeltaCache:
                     anchor_idx=anchor_idx,
                 )
                 tq_entry = self.anchor_cache.compress(keys, values)
-                entry = LayerKVEntry(
-                    layer_idx=layer_idx, is_anchor=False, entry=tq_entry
-                )
+                entry = LayerKVEntry(layer_idx=layer_idx, is_anchor=False, entry=tq_entry)
                 self._layer_entries[layer_idx] = entry
                 return entry
 
@@ -202,9 +203,7 @@ class CrossLayerKVDeltaCache:
                 .item()
             )
 
-            anchor_layer_idx = (
-                layer_idx // self.config.anchor_stride
-            ) * self.config.anchor_stride
+            anchor_layer_idx = (layer_idx // self.config.anchor_stride) * self.config.anchor_stride
 
             if cos_sim_k >= self.config.similarity_threshold:
                 delta_k = keys - anchor_keys
@@ -254,9 +253,7 @@ class CrossLayerKVDeltaCache:
             return self.anchor_cache.decompress(entry.entry)
 
         # Delta reconstruction
-        k_pre, v_pre = self.anchor_cache.decompress(
-            entry.entry
-        )  # decompress anchor
+        k_pre, v_pre = self.anchor_cache.decompress(entry.entry)  # decompress anchor
 
         if entry.delta_keys is None or entry.delta_values is None:
             return k_pre, v_pre
@@ -268,9 +265,9 @@ class CrossLayerKVDeltaCache:
             entry.delta_values, entry.delta_value_norms, original_shape=v_pre.shape
         )
 
-        return (k_pre.float() + k_delta.float()).to(
-            torch.float16
-        ), (v_pre.float() + v_delta.float()).to(torch.float16)
+        return (k_pre.float() + k_delta.float()).to(torch.float16), (
+            v_pre.float() + v_delta.float()
+        ).to(torch.float16)
 
     def memory_usage_all(self) -> dict[str, float]:
         """Projected metrics across the entire multi-layer cache."""
@@ -295,27 +292,19 @@ class CrossLayerKVDeltaCache:
                 num_anchor += 1
                 total_mb += self.anchor_cache.memory_usage(entry.entry)["total_mb"]
             elif (
-                entry.used_delta
-                and entry.delta_keys is not None
-                and entry.delta_values is not None
+                entry.used_delta and entry.delta_keys is not None and entry.delta_values is not None
             ):
                 num_delta += 1
                 # 1-bit delta + norms (explicit nbytes calculation to avoid Optional error)
-                delta_bytes = (
-                    entry.delta_keys.numel() * entry.delta_keys.element_size()
-                )
-                delta_bytes += (
-                    entry.delta_values.numel() * entry.delta_values.element_size()
-                )
+                delta_bytes = entry.delta_keys.numel() * entry.delta_keys.element_size()
+                delta_bytes += entry.delta_values.numel() * entry.delta_values.element_size()
                 if entry.delta_key_norms is not None:
                     delta_bytes += (
-                        entry.delta_key_norms.numel()
-                        * entry.delta_key_norms.element_size()
+                        entry.delta_key_norms.numel() * entry.delta_key_norms.element_size()
                     )
                 if entry.delta_value_norms is not None:
                     delta_bytes += (
-                        entry.delta_value_norms.numel()
-                        * entry.delta_value_norms.element_size()
+                        entry.delta_value_norms.numel() * entry.delta_value_norms.element_size()
                     )
 
                 total_mb += delta_bytes / (1024**2)
