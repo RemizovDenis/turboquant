@@ -242,11 +242,17 @@ class CrossLayerKVDeltaCache:
         """Restore full KV for a given layer."""
         entry = self._layer_entries[layer_idx]
 
+        if entry.entry is None:
+            raise KeyError(f"Layer {layer_idx} has no compressed entry.")
+
         if not entry.used_delta:
             return self.anchor_cache.decompress(entry.entry)
 
         # Delta reconstruction
         k_pre, v_pre = self.anchor_cache.decompress(entry.entry)  # decompress anchor
+
+        if entry.delta_keys is None or entry.delta_values is None:
+            return k_pre, v_pre
 
         k_delta = self.delta_corrector.decode(
             entry.delta_keys, entry.delta_key_norms, original_shape=k_pre.shape
@@ -270,23 +276,27 @@ class CrossLayerKVDeltaCache:
         sim_sum = 0.0
 
         for entry in self._layer_entries.values():
+            if entry.entry is None:
+                continue
+
             # Estimate MB
-            shape = entry.entry.metadata["original_shape"]
+            shape = entry.entry.metadata.get("original_shape", (1, 1, 1, 128))
             layer_fp16 = math.prod(shape) * 2 * 2 / (1024**2)
             fp16_mb += layer_fp16
 
             if entry.is_anchor:
                 num_anchor += 1
                 total_mb += self.anchor_cache.memory_usage(entry.entry)["total_mb"]
-            elif entry.used_delta:
+            elif entry.used_delta and entry.delta_keys is not None and entry.delta_values is not None:
                 num_delta += 1
-                # 1-bit delta + norms
-                delta_bytes = (
-                    entry.delta_keys.nbytes
-                    + entry.delta_values.nbytes
-                    + entry.delta_key_norms.nbytes
-                    + entry.delta_value_norms.nbytes
-                )
+                # 1-bit delta + norms (explicit nbytes calculation to avoid Optional error)
+                delta_bytes = entry.delta_keys.numel() * entry.delta_keys.element_size()
+                delta_bytes += entry.delta_values.numel() * entry.delta_values.element_size()
+                if entry.delta_key_norms is not None:
+                    delta_bytes += entry.delta_key_norms.numel() * entry.delta_key_norms.element_size()
+                if entry.delta_value_norms is not None:
+                    delta_bytes += entry.delta_value_norms.numel() * entry.delta_value_norms.element_size()
+                
                 total_mb += delta_bytes / (1024**2)
             else:
                 num_fallback += 1

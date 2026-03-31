@@ -151,7 +151,7 @@ class CrossRequestKVCache:
     def stats(self) -> dict[str, float | int]:
         """Return sharing statistics and VRAM savings estimate."""
         with self._lock:
-            total_saved_bytes = 0
+            total_saved_bytes = 0.0
             total_refs = 0
             for block in self._shared_blocks.values():
                 # Saving: (ref_count - 1) * footprint

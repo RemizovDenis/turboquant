@@ -50,7 +50,12 @@ class SpeculativeKVDraft:
         return k_bits, v_bits, k_norms, v_norms
 
     def decompress_draft(
-        self, k_bits, v_bits, k_norms, v_norms, shapes
+        self,
+        k_bits: torch.Tensor,
+        v_bits: torch.Tensor,
+        k_norms: torch.Tensor,
+        v_norms: torch.Tensor,
+        shapes: tuple[torch.Size, torch.Size],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Reconstruct approximate KV from 1-bit draft."""
         k_hat = self.sketch.decode(k_bits, k_norms, original_shape=shapes[0])

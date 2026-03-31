@@ -44,7 +44,7 @@ class UltimateBenchmark:
         Path(config.output_dir).mkdir(parents=True, exist_ok=True)
         self.results = {"meta": asdict(config), "suites": {}}
 
-    def run_all(self):
+    def run_all(self) -> None:
         print(f"🚀 Starting TurboQuant v0.3.0 Ultimate Benchmark on {self.device}")
 
         self.results["suites"]["compression_ratio"] = self.bench_compression()
@@ -149,7 +149,7 @@ class UltimateBenchmark:
         savings = fusion.estimate_memory_savings(tracker, weights)
         return savings
 
-    def save_report(self):
+    def save_report(self) -> None:
         out_path = Path(self.config.output_dir) / f"benchmark_v030_{self.timestamp}.json"
         with open(out_path, "w") as f:
             json.dump(self.results, f, indent=2)

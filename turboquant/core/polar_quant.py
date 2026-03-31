@@ -124,9 +124,17 @@ class PolarQuantConfig:
 class PolarQuantizer(nn.Module):
     """Principal ML version of PolarQuantizer with true 3-bit packing."""
 
+    Pi: torch.Tensor
+    levels: torch.Tensor
+    boundaries: torch.Tensor
+    cal_mean: torch.Tensor
+    cal_m2: torch.Tensor
+    cal_count: torch.Tensor
+    calibrated: torch.Tensor
+
     def __init__(
         self,
-        head_dim: int | PolarQuantConfig,
+        head_dim: int = 128,
         bits: int = 3,
         group_size: int = 64,
         seed: int = 42,
@@ -234,14 +242,14 @@ class PolarQuantizer(nn.Module):
             self.cal_m2 += delta * delta2
 
     def calibrate_finalize(self) -> None:
-        if self.cal_count < 2:
+        if self.cal_count.item() < 2:
             return
-        m, v = self.cal_mean.item(), (self.cal_m2 / (self.cal_count - 1)).item()
-        v = max(v, 1e-9)
-        common = (m * (1.0 - m) / v) - 1.0
+        m, v_val = self.cal_mean.item(), (self.cal_m2 / (self.cal_count - 1)).item()
+        v_val = max(float(v_val), 1e-9)
+        common = (m * (1.0 - m) / v_val) - 1.0
         common = max(common, 1e-6)
         alpha, beta_val = m * common, (1.0 - m) * common
-        self._lloyd_max_from_beta_fast(alpha, beta_val)
+        self._lloyd_max_from_beta_fast(float(alpha), float(beta_val))
         self.calibrated.fill_(1)
 
     def calibrate(self, data_list: list[torch.Tensor]) -> None:

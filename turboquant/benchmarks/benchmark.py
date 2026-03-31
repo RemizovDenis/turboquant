@@ -249,8 +249,9 @@ class BenchmarkRunner:
     def triton_benchmark(self) -> dict[str, Any]:
         if self.ctx.device != "cuda":
             return {"warning": "CUDA unavailable; triton benchmark skipped"}
+        # triton_quant.benchmark_triton_kernels expects seq_len (int) and batch (int)
         return benchmark_triton_kernels(
-            seq_lens=self.ctx.seq_lens, head_dim=128, batch_size=self.ctx.batch_size
+            seq_len=self.ctx.seq_lens[0], head_dim=128, batch=self.ctx.batch_size
         )
 
     def speed_benchmark(self) -> dict[str, Any]:

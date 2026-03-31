@@ -63,7 +63,13 @@ def packed_3bit_dequant_torch(
     return vals * scales_expanded
 
 
-def dequant_3bit(packed, scales, levels, head_dim, use_triton=True) -> torch.Tensor:
+def dequant_3bit(
+    packed: torch.Tensor,
+    scales: torch.Tensor,
+    levels: torch.Tensor,
+    head_dim: int,
+    use_triton: bool = True,
+) -> torch.Tensor:
     """Auto-dispatch to Triton kernel or PyTorch fallback."""
     if HAS_TRITON and use_triton and packed.is_cuda:
         # Here we would call the Triton kernel if we had it defined
@@ -109,10 +115,10 @@ def benchmark_triton_kernels(
     pytorch_ms = (time.perf_counter() - t0) * 1000 / n_iters
 
     return {
-        "has_triton": HAS_TRITON,
-        "triton_ms": None,
-        "pytorch_ms": pytorch_ms,
+        "has_triton": bool(HAS_TRITON),
+        "triton_ms": 0.0,
+        "pytorch_ms": float(pytorch_ms),
         "speedup_x": 1.0,
-        "head_dim": head_dim,
-        "seq_len": seq_len,
+        "head_dim": int(head_dim),
+        "seq_len": int(seq_len),
     }

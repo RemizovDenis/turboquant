@@ -205,14 +205,13 @@ class TurboQuantMoE:
         self._lock = threading.RLock()
         self._logger = LOGGER.bind(component="TurboQuantMoE")
 
-        pq_cfg = PolarQuantConfig(
+        self.quantizer = PolarQuantizer(
             head_dim=config.kv_config.head_dim,
             bits=config.kv_config.bits,
             group_size=config.kv_config.group_size,
             seed=config.kv_config.seed,
             use_hadamard=config.kv_config.use_hadamard,
         )
-        self.quantizer = PolarQuantizer(pq_cfg)
 
         config.kv_config.enable_semantic_eviction = config.enable_semantic_kv_eviction
         config.kv_config.enable_cross_layer_sharing = config.enable_cross_layer_kv

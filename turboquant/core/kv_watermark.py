@@ -45,8 +45,8 @@ class KVCacheWatermarker:
         num_bits = scales_shape.numel() * self.config.bits_per_scale_group
 
         # Simple expansion via repeated hashing (pseudo-random stream)
-        bits_raw = []
-        curr_hash = h.digest()
+        bits_raw: list[bytes] = []
+        curr_hash: bytes = h.digest()
         while len(bits_raw) * 8 < num_bits:
             bits_raw.append(curr_hash)
             curr_hash = hashlib.sha256(curr_hash).digest()
@@ -119,7 +119,7 @@ class KVCacheWatermarker:
         )
         return new_entry
 
-    def detect(self, entry: CacheEntry, sequence_id: str) -> dict[str, float | bool]:
+    def detect(self, entry: CacheEntry, sequence_id: str) -> dict[str, float | bool | str]:
         """Detect watermark by extracting LSBs and comparing with deterministic expected bits."""
         s_k = entry.compressed_keys[1]
 

@@ -21,7 +21,7 @@ def next_power_of_two(n: int) -> int:
     """Return the smallest power of 2 greater than or equal to n."""
     if n <= 0:
         return 1
-    return 2 ** math.ceil(math.log2(n))
+    return int(2 ** math.ceil(math.log2(n)))
 
 
 def hadamard_transform(x: torch.Tensor, normalize: bool = True) -> torch.Tensor:

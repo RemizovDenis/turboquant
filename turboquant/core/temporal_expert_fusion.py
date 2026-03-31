@@ -96,11 +96,9 @@ class TemporalExpertFusion:
                 u, s, vh = torch.linalg.svd(W, full_matrices=False)
                 k = int(min(W.shape) * self.config.svd_rank_ratio)
                 k = max(k, 1)
-                # Composite = u @ Σ @ vh truncated to k
-                # (R, k) @ (k, k) @ (k, C) -> (R, C)
-                return u[:, :k] @ torch.diag(s[:k]) @ vh[:k, :]
+                res: torch.Tensor = u[:, :k] @ torch.diag(s[:k]) @ vh[:k, :]
+                return res
             except RuntimeError:
-                # Fallback if SVD fails (rare)
                 return W
 
         composite_gate = _compress_svd(w_gate_combined)

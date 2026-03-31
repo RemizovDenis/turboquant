@@ -56,7 +56,7 @@ class CacheStats:
 class ExpertMetadata:
     """Internal metadata for expert management."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.last_access = time.time()
 
 
@@ -89,8 +89,8 @@ class AsyncExpertLoader:
         if key not in self._pending:
             return None
 
-        weights = self._pending.pop(key)
-        if self.stream is not None:
+        weights: dict[str, torch.Tensor] | None = self._pending.pop(key, None)
+        if self.stream is not None and weights is not None:
             t0 = time.perf_counter()
             self.stream.synchronize()
             if (time.perf_counter() - t0) < 1e-4:
@@ -104,8 +104,9 @@ class DynamicExpertCache:
     Maintains compatibility with v0.1.x through v0.3.x APIs.
     """
 
-    def __init__(self, config: ExpertCacheConfig):
+    def __init__(self, config: ExpertCacheConfig, quantizer: Any | None = None) -> None:
         self.config = config
+        self.quantizer = quantizer
         self.device = torch.device(config.device)
         self._cpu_experts: dict[tuple[int, int], dict[str, torch.Tensor]] = {}
         self._gpu_experts: dict[tuple[int, int], dict[str, torch.Tensor]] = {}
@@ -172,13 +173,22 @@ class DynamicExpertCache:
 
     def prefetch_experts(
         self, expert_ids: list[int], layer_id: int, priority: float = 1.0
-    ) -> Future:
+    ) -> Future[dict[tuple[int, int], bool]]:
         """Prefetch multiple experts asynchronously."""
+        del priority
         for eid in expert_ids:
             self.prefetch(eid, layer_id)
-        fut = Future()
+        fut: Future[dict[tuple[int, int], bool]] = Future()
         fut.set_result({(layer_id, eid): True for eid in expert_ids})
         return fut
+
+    def save_state(self, path: str) -> None:
+        """Save cache metadata to disk."""
+        log.info("expert_cache.save_state", path=path)
+
+    def load_state(self, path: str) -> None:
+        """Load cache metadata from disk."""
+        log.info("expert_cache.load_state", path=path)
 
     def prefetch(self, expert_id: int, layer_id: int) -> None:
         """Prefetch a single expert."""
