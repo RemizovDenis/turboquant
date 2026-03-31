@@ -15,8 +15,8 @@ import structlog
 import torch
 import torch.nn.functional as F  # noqa: N812
 
-from turboquant.core.qjl import QJLResidualCorrector
 from turboquant.core.adaptive_bitwidth import AdaptiveCompressedCache
+from turboquant.core.qjl import QJLResidualCorrector
 from turboquant.core.turboquant import CacheEntry, TurboQuantConfig, TurboQuantKVCache
 
 log = structlog.get_logger(__name__)

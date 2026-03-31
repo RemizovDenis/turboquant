@@ -10,8 +10,8 @@ import structlog
 import torch
 import torch.nn.functional as functional
 
-from turboquant.core.polar_quant import PolarQuantConfig, PolarQuantizer
 from turboquant.core.adaptive_bitwidth import AdaptiveCompressedCache
+from turboquant.core.polar_quant import PolarQuantConfig, PolarQuantizer
 from turboquant.core.turboquant import CacheEntry, TurboQuantKVCache
 
 LOGGER = structlog.get_logger(__name__)
