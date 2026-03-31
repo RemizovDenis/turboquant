@@ -273,7 +273,7 @@ class MarkovTrajectoryPredictor(nn.Module):
             if not confidence_ok and not probability_ok:
                 continue
             layer_preds[layer_id].append(pred)
-            for expert_id, prob in zip(pred.expert_ids, pred.probabilities):
+            for expert_id, prob in zip(pred.expert_ids, pred.probabilities):  # noqa: B905
                 effective_confidence = max(pred.confidence, self.config.prefetch_threshold, 0.05)
                 score = max(
                     0.0,

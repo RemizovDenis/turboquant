@@ -51,4 +51,5 @@ docker-compose.override.yml
 # OS-specific
 Thumbs.db
 Desktop.ini
-v030_fix/\nv030_ci_fix/
+v030_fix/
+v030_ci_fix/
