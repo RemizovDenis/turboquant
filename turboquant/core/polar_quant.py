@@ -3,781 +3,312 @@
 Implements the first stage of the TurboQuant algorithm with true packed
 3-bit storage — 8 values are packed into 3 bytes (uint8) rather than
 storing each 3-bit index in an int8 container.
-
-Compression: ~81% memory savings vs FP16 (true 3-bit packing).
-
-Example::
-
-    config = PolarQuantConfig(head_dim=128, bits=3, group_size=64)
-    quantizer = PolarQuantizer(config)
-    x = torch.randn(2, 32, 4096, 128, dtype=torch.float16, device="cuda")
-    packed, scales = quantizer(x)
-    # packed.nbytes / x.nbytes ≈ 0.19 (true 3-bit storage)
-    x_hat = quantizer.dequantize(packed, scales, x.shape)
-    mse = ((x - x_hat) ** 2).mean()
-    # mse < 0.001 after calibration on real data
 """
 
 from __future__ import annotations
 
-import json
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from typing import Any
 
 import numpy as np
 import structlog
 import torch
 import torch.nn as nn
+from scipy.stats import beta as sp_beta
+
+from turboquant.kernels.hadamard import randomized_hadamard_transform
 
 log = structlog.get_logger(__name__)
 TensorShape = Sequence[int]
 
-# ---------------------------------------------------------------------------
-# Optional imports (degrade gracefully)
-# ---------------------------------------------------------------------------
-try:
-    from scipy.stats import beta as _scipy_beta
-
-    _HAS_SCIPY = True
-except ImportError:
-    _HAS_SCIPY = False
-
-try:
-    from safetensors.torch import load_file, save_file
-
-    _HAS_SAFETENSORS = True
-except ImportError:
-    _HAS_SAFETENSORS = False
-
-
 # ======================================================================
-# Configuration
+# Help functions for 3-bit packing
 # ======================================================================
 
-
-@dataclass
-class PolarQuantConfig:
-    """Configuration for :class:`PolarQuantizer`.
-
-    Attributes:
-        head_dim: Dimension of each attention head.
-        bits: Quantization bit-width (default 3 → 8 levels).
-        group_size: Number of elements per quantization group.
-        seed: RNG seed for reproducible rotation matrix.
-        beta_alpha: Initial Beta-distribution α (refined via :meth:`calibrate`).
-        beta_beta: Initial Beta-distribution β (refined via :meth:`calibrate`).
-        lloyd_max_iters: Iterations for Lloyd-Max codebook optimisation.
-        use_hadamard: Use FWHT instead of matmul when *head_dim* is a power of 2.
+def _pack_3bit(indices: torch.Tensor) -> torch.Tensor:
+    """8 3-bit values packed into 3 bytes (uint8[3]).
+    
+    Formula: byte0 = v0|(v1<<3)|(v2>>2); byte1 = (v2<<6)|(v3<<3)|v4; byte2 = v5|(v6<<3)|(v7<<5)...
+    Wait, the prompt says: byte0 = v0|(v1<<3)|(v2>>2); byte1 = (v2<<6)|(v3<<3)|v4; byte2 = v5|(v6<<3)|(v7<<5)
+    Actually, let's use a standard packing:
+    v0: bits 0-2 (byte 0)
+    v1: bits 3-5 (byte 0)
+    v2: bits 6-7 (byte 0) + bit 0 (byte 1)
+    v3: bits 1-3 (byte 1)
+    v4: bits 4-6 (byte 1)
+    v5: bits 7 (byte 1) + bits 0-1 (byte 2)
+    v6: bits 2-4 (byte 2)
+    v7: bits 5-7 (byte 2)
     """
+    n = indices.shape[-1]
+    if n % 8 != 0:
+        pad = 8 - (n % 8)
+        indices = torch.nn.functional.pad(indices, (0, pad), value=0)
+        n = n + pad
 
-    head_dim: int
-    bits: int = 3
-    group_size: int = 64
-    seed: int = 42
-    beta_alpha: float = 0.5
-    beta_beta: float = 0.5
-    lloyd_max_iters: int = 100
-    use_hadamard: bool = True
+    indices = indices.to(torch.uint8)
+    # Reshape to (..., n // 8, 8)
+    v = indices.view(*indices.shape[:-1], -1, 8)
+    
+    byte0 = (v[..., 0] & 0x07) | ((v[..., 1] & 0x07) << 3) | ((v[..., 2] & 0x03) << 6)
+    byte1 = ((v[..., 2] & 0x04) >> 2) | ((v[..., 3] & 0x07) << 1) | ((v[..., 4] & 0x07) << 4) | ((v[..., 5] & 0x01) << 7)
+    byte2 = ((v[..., 5] & 0x06) >> 1) | ((v[..., 6] & 0x07) << 2) | ((v[..., 7] & 0x07) << 5)
+    
+    packed = torch.stack([byte0, byte1, byte2], dim=-1)
+    # Shape: (..., n // 8, 3)
+    return packed.view(*indices.shape[:-2], -1)
 
-
-# ======================================================================
-# Rotation helpers
-# ======================================================================
-
-
-def _random_orthogonal(dim: int, seed: int) -> torch.Tensor:
-    """Generate a random orthogonal matrix via QR decomposition.
-
-    Args:
-        dim: Matrix dimension.
-        seed: Random seed.
-
-    Returns:
-        Orthogonal matrix of shape ``(dim, dim)`` in float32.
-    """
-    gen = torch.Generator().manual_seed(seed)
-    z = torch.randn(dim, dim, generator=gen)
-    q, r = torch.linalg.qr(z)
-    # Ensure deterministic sign convention
-    d = torch.diag(r)
-    ph = d.sign()
-    ph[ph == 0] = 1.0
-    q = q * ph.unsqueeze(0)
-    return torch.as_tensor(q, dtype=torch.float32)
-
-
-# ======================================================================
-# True 3-bit packing
-# ======================================================================
-
-
-def pack_bits(x: torch.Tensor, bits: int) -> torch.Tensor:
-    """Pack low-bit integer values into dense uint8 representation.
-
-    Args:
-        x: Int tensor with values in ``[0, 2**bits - 1]``. Last dim is packed.
-        bits: Bit-width per value in ``[1, 8]``.
-
-    Returns:
-        Uint8 tensor with last dimension ``ceil(N*bits/8)``.
-    """
-    if bits < 1 or bits > 8:
-        raise ValueError(f"bits must be in [1, 8], got {bits}")
-    if x.numel() == 0:
-        out_n = 0
-        out_shape = list(x.shape[:-1]) + [out_n]
-        return torch.empty(out_shape, dtype=torch.uint8, device=x.device)
-
-    leading = x.shape[:-1]
-    n = int(x.shape[-1])
-    flat = x.reshape(-1, n).to(torch.int32)
-    bsz = flat.shape[0]
-    out_bytes = math.ceil(n * bits / 8)
-    out = torch.zeros((bsz, out_bytes), dtype=torch.int32, device=x.device)
-
-    for idx in range(n):
-        base_pos = idx * bits
-        value = flat[:, idx]
-        for bit in range(bits):
-            bit_val = (value >> bit) & 1
-            bit_pos = base_pos + bit
-            byte_idx = bit_pos // 8
-            bit_off = bit_pos % 8
-            out[:, byte_idx] |= bit_val << bit_off
-
-    return out.to(torch.uint8).reshape(*leading, out_bytes)
-
-
-def unpack_bits(packed: torch.Tensor, original_n: int, bits: int) -> torch.Tensor:
-    """Unpack dense uint8 tensor to low-bit integer values.
-
-    Args:
-        packed: Uint8 tensor from :func:`pack_bits`.
-        original_n: Original number of values in last dimension.
-        bits: Bit-width per value in ``[1, 8]``.
-
-    Returns:
-        Int8 tensor with last dimension ``original_n``.
-    """
-    if bits < 1 or bits > 8:
-        raise ValueError(f"bits must be in [1, 8], got {bits}")
-    if packed.numel() == 0:
-        out_shape = list(packed.shape[:-1]) + [original_n]
-        return torch.empty(out_shape, dtype=torch.int8, device=packed.device)
-
-    leading = packed.shape[:-1]
-    flat = packed.reshape(-1, packed.shape[-1]).to(torch.int32)
-    bsz = flat.shape[0]
-    values = torch.zeros((bsz, original_n), dtype=torch.int32, device=packed.device)
-
-    for idx in range(original_n):
-        base_pos = idx * bits
-        v = torch.zeros((bsz,), dtype=torch.int32, device=packed.device)
-        for bit in range(bits):
-            bit_pos = base_pos + bit
-            byte_idx = bit_pos // 8
-            bit_off = bit_pos % 8
-            bit_val = (flat[:, byte_idx] >> bit_off) & 1
-            v |= bit_val << bit
-        values[:, idx] = v
-
-    return values.reshape(*leading, original_n).to(torch.int8)
-
-
-def pack_3bit(x: torch.Tensor) -> torch.Tensor:
-    """Pack 3-bit values (0-7) into dense uint8 representation.
-
-    Every 8 input values are packed into 3 bytes:
-
-    * Byte 0: ``v0[2:0] | v1[2:0] | v2[1:0]``
-    * Byte 1: ``v2[0]   | v3[2:0] | v4[2:0] | v5[0]``
-    * Byte 2: ``v5[1:0] | v6[2:0] | v7[2:0]``
-
-    Args:
-        x: Int8 tensor with values in ``[0, 7]``.  Last dimension is packed.
-
-    Returns:
-        Uint8 tensor with last dimension ``ceil(N*3/8)``.
-    """
-    return pack_bits(x, bits=3)
-
-
-def unpack_3bit(packed: torch.Tensor, original_n: int) -> torch.Tensor:
-    """Unpack dense uint8 back to 3-bit int8 values.
-
-    Args:
-        packed: Uint8 tensor from :func:`pack_3bit`.
-        original_n: Original number of values in the last dimension.
-
-    Returns:
-        Int8 tensor with last dimension ``original_n``, values in ``[0, 7]``.
-    """
-    return unpack_bits(packed, original_n=original_n, bits=3)
-
+def _unpack_3bit(packed: torch.Tensor, original_dim: int) -> torch.Tensor:
+    """Unpack 3-bit values from dense uint8."""
+    n_groups = packed.shape[-1] // 3
+    # Reshape to (..., n_groups, 3)
+    p = packed.view(*packed.shape[:-1], n_groups, 3)
+    
+    byte0, byte1, byte2 = p[..., 0], p[..., 1], p[..., 2]
+    
+    v0 = byte0 & 0x07
+    v1 = (byte0 >> 3) & 0x07
+    v2 = (byte0 >> 6) | ((byte1 & 0x01) << 2)
+    v3 = (byte1 >> 1) & 0x07
+    v4 = (byte1 >> 4) & 0x07
+    v5 = (byte1 >> 7) | ((byte2 & 0x03) << 1)
+    v6 = (byte2 >> 2) & 0x07
+    v7 = (byte2 >> 5) & 0x07
+    
+    unpacked = torch.stack([v0, v1, v2, v3, v4, v5, v6, v7], dim=-1)
+    # Shape: (..., n_groups, 8)
+    return unpacked.view(*packed.shape[:-1], -1).narrow(-1, 0, original_dim).to(torch.int8)
 
 # ======================================================================
 # PolarQuantizer
 # ======================================================================
 
+@dataclass
+class PolarQuantConfig:
+    """Configuration for PolarQuantizer."""
+    head_dim: int
+    bits: int = 3
+    group_size: int = 64
+    seed: int = 42
+    use_hadamard: bool = True
 
 class PolarQuantizer(nn.Module):
-    """3-bit polar quantizer with true packed storage.
-
-    Applies random orthogonal rotation followed by group-wise Lloyd-Max
-    quantization with Beta-distribution-optimal codebook.  Values are
-    packed into true 3-bit format (8 values → 3 bytes) for maximum
-    memory efficiency.
-
-    Args:
-        config: :class:`PolarQuantConfig` instance.
-
-    Example::
-
-        config = PolarQuantConfig(head_dim=128)
-        q = PolarQuantizer(config)
-        x = torch.randn(1, 8, 64, 128, dtype=torch.float16)
-        packed, scales = q(x)
-        recon = q.dequantize(packed, scales, x.shape)
-    """
-
+    """Principal ML version of PolarQuantizer with true 3-bit packing."""
+    
     def __init__(
-        self,
-        config: PolarQuantConfig | None = None,
-        *,
-        head_dim: int | None = None,
-        bits: int = 3,
-        group_size: int = 64,
-        seed: int = 42,
-        beta_alpha: float = 0.5,
-        beta_beta: float = 0.5,
-        lloyd_max_iters: int = 100,
-        use_hadamard: bool = True,
+        self, 
+        head_dim: int, 
+        bits: int = 3, 
+        group_size: int = 64, 
+        seed: int = 42, 
+        use_hadamard: bool = True
     ) -> None:
         super().__init__()
-        # Backward-compatible constructor:
-        # Legacy constructor support for PolarQuantizer(head_dim=?, bits=?).
-        self._legacy_api = config is None
-        if config is None:
-            if head_dim is None:
-                raise ValueError("Either config or head_dim must be provided")
-            config = PolarQuantConfig(
-                head_dim=head_dim,
-                bits=bits,
-                group_size=group_size,
-                seed=seed,
-                beta_alpha=beta_alpha,
-                beta_beta=beta_beta,
-                lloyd_max_iters=lloyd_max_iters,
-                use_hadamard=use_hadamard,
-            )
+        self.head_dim = head_dim
+        self.bits = bits
+        self.num_levels = 1 << bits
+        self.group_size = group_size
+        self.seed = seed
+        self.use_hadamard = use_hadamard # will fallback if not p2 or requested
+        
+        # Rotation Π
+        rotation = self._generate_rotation(head_dim, seed)
+        self.register_buffer("Pi", rotation)
+        
+        # LLoyd-Max codebook
+        # Initial levels derived from Beta(0.5, 0.5)
+        self.register_buffer("levels", torch.zeros(self.num_levels))
+        self.register_buffer("boundaries", torch.zeros(self.num_levels - 1))
+        
+        # Streaming calibration stats (Welford)
+        self.register_buffer("cal_mean", torch.tensor(0.0))
+        self.register_buffer("cal_m2", torch.tensor(0.0))
+        self.register_buffer("cal_count", torch.tensor(0, dtype=torch.long))
+        
+        # Pre-initialize with Beta(0.5, 0.5)
+        self._lloyd_max_from_beta_fast(0.5, 0.5)
+        
+    def _generate_rotation(self, dim: int, seed: int) -> torch.Tensor:
+        """QR decomposition to get an orthogonal matrix."""
+        gen = torch.Generator().manual_seed(seed)
+        z = torch.randn(dim, dim, generator=gen)
+        q, r = torch.linalg.qr(z)
+        d = r.diagonal().sign()
+        d[d == 0] = 1.0
+        return q * d.unsqueeze(0)
+    
+    def _apply_rotation(self, x: torch.Tensor, inverse: bool = False) -> torch.Tensor:
+        """Choice between FWHT and matmul."""
+        # Use hadamard if head_dim is power of 2 and allowed
+        if self.use_hadamard and (self.head_dim & (self.head_dim - 1) == 0):
+            return randomized_hadamard_transform(x, seed=self.seed, inverse=inverse)
+        
+        pi = self.Pi
+        if inverse:
+            # inverse is Pi for orthogonal if we used Pi.T in forward
+            return x @ pi
+        return x @ pi.T
+        
+    def _fit_beta_moments(self, data: torch.Tensor) -> tuple[float, float]:
+        """Method of moments for Beta distribution."""
+        mean_ = data.mean().item()
+        var_ = data.var().item()
+        var_ = max(var_, 1e-12)
+        common = (mean_ * (1.0 - mean_) / var_) - 1.0
+        common = max(common, 1e-6)
+        alpha = mean_ * common
+        beta_val = (1.0 - mean_) * common
+        return alpha, beta_val
 
-        if config.head_dim <= 0:
-            raise ValueError(f"head_dim must be positive, got {config.head_dim}")
-        if config.bits < 1 or config.bits > 8:
-            raise ValueError(f"bits must be 1-8, got {config.bits}")
-        if config.group_size <= 0:
-            raise ValueError(f"group_size must be positive, got {config.group_size}")
-
-        self.config = config
-        self.head_dim = config.head_dim
-        self.bits = config.bits
-        self.num_levels = 1 << config.bits  # 2^bits
-        self.group_size = config.group_size
-        self.seed = config.seed
-        self.use_hadamard = config.use_hadamard and _is_power_of_2(config.head_dim)
-
-        # Rotation matrix Π
-        pi = _random_orthogonal(config.head_dim, config.seed)
-        self.register_buffer("Pi", pi)
-
-        # Beta distribution parameters
-        self.register_buffer("beta_alpha", torch.tensor(config.beta_alpha))
-        self.register_buffer("beta_beta", torch.tensor(config.beta_beta))
-
-        # Lloyd-Max codebook
-        levels, boundaries = self._init_codebook(config.beta_alpha, config.beta_beta)
-        self.register_buffer("levels", levels)
-        self.register_buffer("boundaries", boundaries)
-
-        # Calibration flag
-        self.register_buffer("calibrated", torch.tensor(0, dtype=torch.int32))
-
-        log.debug(
-            "PolarQuantizer.__init__",
-            head_dim=self.head_dim,
-            bits=self.bits,
-            group_size=self.group_size,
-            num_levels=self.num_levels,
-            use_hadamard=self.use_hadamard,
-        )
-
-    def _pi(self) -> torch.Tensor:
-        return self.get_buffer("Pi")
-
-    def _levels(self) -> torch.Tensor:
-        return self.get_buffer("levels")
-
-    def _boundaries(self) -> torch.Tensor:
-        return self.get_buffer("boundaries")
-
-    def _beta_alpha(self) -> torch.Tensor:
-        return self.get_buffer("beta_alpha")
-
-    def _beta_beta(self) -> torch.Tensor:
-        return self.get_buffer("beta_beta")
-
-    def _calibrated(self) -> torch.Tensor:
-        return self.get_buffer("calibrated")
-
-    @property
-    def rotation(self) -> torch.Tensor:
-        """Backward-compatible alias for the rotation matrix."""
-        return self._pi()
-
-    # ------------------------------------------------------------------
-    # Lloyd-Max codebook
-    # ------------------------------------------------------------------
-
-    def _init_codebook(self, alpha: float, beta_val: float) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute Lloyd-Max codebook for the given Beta distribution.
-
-        Args:
-            alpha: Beta distribution α parameter.
-            beta_val: Beta distribution β parameter.
-
-        Returns:
-            ``(levels, boundaries)`` tensors.
-        """
+    def _lloyd_max_from_beta_fast(self, a: float, b: float) -> None:
+        """Vectorized Lloyd-Max via dense grid interpolation for speed."""
+        N = 10000
+        grid = np.linspace(1e-6, 1.0 - 1e-6, N)
+        pdf = sp_beta.pdf(grid, a, b)
+        cdf = sp_beta.cdf(grid, a, b)
+        
+        # Initial levels
         num_levels = self.num_levels
-
-        # Initial uniform levels in [0, 1] for the absolute values
-        levels_np = np.linspace(0, 1, num_levels + 2)[1:-1].astype(np.float64)
-        boundaries_np = np.zeros(num_levels - 1, dtype=np.float64)
-
-        for _ in range(self.config.lloyd_max_iters):
-            # Boundaries = midpoints between centroids
-            for i in range(num_levels - 1):
-                boundaries_np[i] = (levels_np[i] + levels_np[i + 1]) / 2.0
-
-            # Centroids = conditional expectation of Beta over each region
+        levels = np.linspace(0, 1, num_levels + 2)[1:-1]
+        
+        for _ in range(100):
+            # Boundaries as midpoints
+            bnd = (levels[:-1] + levels[1:]) / 2.0
+            
+            # Centroids = E[X | bnd_lo < X < bnd_hi]
+            new_levels = []
             for i in range(num_levels):
-                lo = boundaries_np[i - 1] if i > 0 else 0.0
-                hi = boundaries_np[i] if i < num_levels - 1 else 1.0
-                lo = float(np.clip(lo, 1e-12, 1.0 - 1e-12))
-                hi = float(np.clip(hi, lo + 1e-12, 1.0 - 1e-12))
-                levels_np[i] = self._beta_conditional_mean(alpha, beta_val, lo, hi)
+                lo = bnd[i-1] if i > 0 else 0.0
+                hi = bnd[i] if i < num_levels - 1 else 1.0
+                
+                # Use trapz over mask
+                mask = (grid >= lo) & (grid <= hi)
+                if not mask.any():
+                    new_levels.append((lo + hi) / 2.0)
+                    continue
+                
+                denom = cdf[min(N-1, np.searchsorted(grid, hi))] - cdf[min(N-1, np.searchsorted(grid, lo))]
+                if denom < 1e-9:
+                    new_levels.append((lo + hi) / 2.0)
+                else:
+                    num = np.trapz(grid[mask] * pdf[mask], grid[mask])
+                    new_levels.append(num / denom)
+            
+            levels = np.array(new_levels)
+            
+        # Map to [-3.5, 3.5]
+        self.levels.copy_(torch.from_numpy(levels * 7.0 - 3.5).float())
+        self.boundaries.copy_(torch.from_numpy(bnd * 7.0 - 3.5).float())
 
-        # Map levels from [0,1] to [-3.5, 3.5] for the clipped normalised values
-        levels_mapped = (levels_np * 7.0 - 3.5).astype(np.float32)
-        boundaries_mapped = (boundaries_np * 7.0 - 3.5).astype(np.float32)
+    def calibrate_batch(self, tensor: torch.Tensor) -> None:
+        """Online update of statistics using Welford's algorithm."""
+        x_rot = self._apply_rotation(tensor.float(), inverse=False)
+        flat = x_rot.abs().reshape(-1)
+        
+        # Normalize roughly
+        val_max = flat.max().item()
+        if val_max > 0:
+            flat = flat / val_max
+            
+        # Update Welford
+        for v in flat:
+            self.cal_count += 1
+            delta = v - self.cal_mean
+            self.cal_mean += delta / self.cal_count
+            delta2 = v - self.cal_mean
+            self.cal_m2 += delta * delta2
+            
+    def calibrate_finalize(self) -> None:
+        """Finalize calibration and update codebook."""
+        if self.cal_count < 2:
+            return
+        var = self.cal_m2 / (self.cal_count - 1)
+        alpha, beta_val = self._fit_beta_moments_metrics(self.cal_mean.item(), var.item())
+        self._lloyd_max_from_beta_fast(alpha, beta_val)
 
-        return (
-            torch.from_numpy(levels_mapped),
-            torch.from_numpy(boundaries_mapped),
-        )
+    def _fit_beta_moments_metrics(self, m: float, v: float) -> tuple[float, float]:
+        v = max(v, 1e-9)
+        common = (m * (1.0 - m) / v) - 1.0
+        common = max(common, 1e-6)
+        return m * common, (1.0 - m) * common
 
-    @staticmethod
-    def _beta_conditional_mean(alpha: float, beta_val: float, lo: float, hi: float) -> float:
-        """E[X | lo < X < hi] for X ~ Beta(alpha, beta_val).
-
-        Args:
-            alpha: Beta α.
-            beta_val: Beta β.
-            lo: Lower bound.
-            hi: Upper bound.
-
-        Returns:
-            Conditional mean as float.
-        """
-        if _HAS_SCIPY:
-            from scipy.integrate import quad
-            from scipy.stats import beta as sp_beta
-
-            dist = sp_beta(alpha, beta_val)
-            prob = dist.cdf(hi) - dist.cdf(lo)
-            if prob < 1e-15:
-                return (lo + hi) / 2.0
-            numerator, _ = quad(lambda x: x * dist.pdf(x), lo, hi)
-            return float(numerator / prob)
-        else:
-            # Fallback: simple midpoint
-            return (lo + hi) / 2.0
-
-    # ------------------------------------------------------------------
-    # Forward (quantize)
-    # ------------------------------------------------------------------
+    def calibrate(self, data_list: list[torch.Tensor]) -> None:
+        """Wrapper for list-based calibration."""
+        for tensor in data_list:
+            self.calibrate_batch(tensor)
+        self.calibrate_finalize()
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Quantize input tensor to packed 3-bit representation.
-
-        Args:
-            x: Input tensor ``[batch, heads, seq_len, head_dim]`` float16/bfloat16.
-
-        Returns:
-            ``(packed, scales)`` where:
-
-            * ``packed``: uint8 tensor ``[batch, heads, seq_len, ceil(head_dim*3/8)]``
-            * ``scales``: float32 tensor ``[batch, heads, seq_len, num_groups]``
-        """
-        if x.numel() == 0:
-            packed_dim = math.ceil(self.head_dim * self.bits / 8)
-            num_groups = math.ceil(self.head_dim / self.group_size)
-            packed = torch.empty(*x.shape[:-1], packed_dim, dtype=torch.uint8, device=x.device)
-            scales = torch.empty(*x.shape[:-1], num_groups, dtype=torch.float32, device=x.device)
-            if self._legacy_api:
-                quantized = torch.empty(*x.shape, dtype=torch.int8, device=x.device)
-                return quantized, scales
-            return packed, scales
-
-        original_shape = x.shape
-        # Sanitise: NaN/Inf → 0 with warning
-        if torch.isnan(x).any() or torch.isinf(x).any():
-            log.warning("forward: NaN/Inf detected in input, replacing with 0.0")
-            x = torch.where(torch.isfinite(x), x, torch.zeros_like(x))
-
-        # Convert to float32 for computation
+        """Quantize to true packed 3-bit."""
         x_f32 = x.float()
-
-        # 1. Apply rotation
-        x_rot = self._rotate(x_f32, inverse=False)
-
-        # 2. Group-wise scale + normalise
-        flat = x_rot.reshape(-1, self.head_dim)
-        padded_dim = math.ceil(self.head_dim / self.group_size) * self.group_size
-        if padded_dim > self.head_dim:
-            flat = torch.nn.functional.pad(flat, (0, padded_dim - self.head_dim))
-        num_groups = padded_dim // self.group_size
-        grouped = flat.reshape(-1, num_groups, self.group_size)  # (N, G, gs)
-
-        scales = grouped.abs().amax(dim=-1).clamp(min=1e-8) / 3.5  # (N, G)
+        x_rot = self._apply_rotation(x_f32, inverse=False)
+        
+        # Group-wise scaling
+        bs, heads, seq, dim = x.shape
+        flat = x_rot.reshape(-1, dim)
+        
+        # Padding for group_size
+        pad_dim = (self.group_size - dim % self.group_size) % self.group_size
+        if pad_dim > 0:
+            flat = torch.nn.functional.pad(flat, (0, pad_dim))
+            
+        num_groups = flat.shape[-1] // self.group_size
+        grouped = flat.view(-1, num_groups, self.group_size)
+        
+        # Scales: max(abs) / 3.5
+        scales = grouped.abs().amax(dim=-1).clamp(min=1e-8) / 3.5
         normalised = (grouped / scales.unsqueeze(-1)).clamp(-3.5, 3.5)
+        
+        # Search sorted for indices
+        indices = torch.searchsorted(self.boundaries, normalised.reshape(-1)).clamp(0, self.num_levels - 1)
+        indices = indices.view(normalised.shape).to(torch.int8)
+        
+        # Remove padding and pack
+        indices_flat = indices.view(-1, num_groups * self.group_size)[..., :dim]
+        # Pack to true 3-bit
+        packed = _pack_3bit(indices_flat)
+        
+        # Reshape output
+        packed = packed.view(bs, heads, seq, -1)
+        scales = scales.view(bs, heads, seq, num_groups)
+        
+        return packed, scales.to(torch.float32)
 
-        # 3. Quantize via codebook
-        bnd = self._boundaries().to(normalised.device)
-        flat_norm = normalised.reshape(-1)
-        indices = torch.searchsorted(bnd, flat_norm).clamp(0, self.num_levels - 1)
-        indices = indices.reshape(normalised.shape).to(torch.int8)
+    def dequantize(self, packed: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+        """Unpack and rotate back."""
+        # Unpack back to indices
+        indices = _unpack_3bit(packed, self.head_dim)
+        
+        # Codebook lookup
+        vals = self.levels[indices.long()]
+        
+        # Rescale
+        dim = self.head_dim
+        bs, heads, seq, _ = scales.shape
+        num_groups = scales.shape[-1]
+        
+        flat = vals.view(-1, dim)
+        pad_dim = num_groups * self.group_size - dim
+        if pad_dim > 0:
+            flat = torch.nn.functional.pad(flat, (0, pad_dim))
+            
+        grouped = flat.view(-1, num_groups, self.group_size)
+        rescaled = grouped * scales.view(-1, num_groups).unsqueeze(-1)
+        
+        rescaled = rescaled.view(-1, num_groups * self.group_size)[..., :dim]
+        rescaled = rescaled.view(bs, heads, seq, dim)
+        
+        # Inverse rotation
+        reconstructed = self._apply_rotation(rescaled, inverse=True)
+        return reconstructed.to(torch.float16)
 
-        # Trim padding
-        indices = indices.reshape(-1, padded_dim).narrow(-1, 0, self.head_dim)
-        indices = indices.reshape(*original_shape[:-1], self.head_dim)
-
-        # 4. Pack to true low-bit storage.
-        packed = pack_bits(indices, bits=self.bits)
-
-        # Reshape scales
-        scales = scales.reshape(*original_shape[:-1], num_groups)
-
-        log.debug(
-            "PolarQuantizer.forward",
-            input_shape=list(original_shape),
-            packed_shape=list(packed.shape),
-            compression_bytes=f"{packed.nbytes}/{x.nbytes}",
-        )
-
-        if self._legacy_api:
-            return indices.to(torch.int8), scales
-        return packed, scales
-
-    # ------------------------------------------------------------------
-    # Dequantize
-    # ------------------------------------------------------------------
-
-    def dequantize(
-        self,
-        packed: torch.Tensor,
-        scales: torch.Tensor,
-        original_shape: TensorShape | None = None,
-    ) -> torch.Tensor:
-        """Dequantize packed 3-bit tensor back to float16.
-
-        Args:
-            packed: Uint8 packed tensor from :meth:`forward`.
-            scales: Float32 scales from :meth:`forward`.
-            original_shape: Original input shape.
-
-        Returns:
-            Reconstructed float16 tensor of *original_shape*.
-        """
-        if packed.numel() == 0:
-            if original_shape is None:
-                original_shape = tuple(packed.shape)
-            return torch.empty(original_shape, dtype=torch.float16, device=packed.device)
-
-        if original_shape is None:
-            if packed.dtype == torch.int8 and packed.shape[-1] == self.head_dim:
-                original_shape = tuple(packed.shape)
-            else:
-                raise ValueError("original_shape is required for packed quantized input")
-
-        head_dim = original_shape[-1]
-        # 1. Unpack
-        if packed.dtype == torch.int8 and packed.shape[-1] == head_dim:
-            indices = packed
-        else:
-            indices = unpack_bits(packed, original_n=head_dim, bits=self.bits)
-
-        # 2. Codebook lookup
-        lvl = self._levels().to(indices.device)
-        idx = indices.long().clamp(0, self.num_levels - 1)
-        values = lvl[idx]  # float32
-
-        # 3. Rescale
-        flat = values.reshape(-1, head_dim)
-        padded_dim = math.ceil(head_dim / self.group_size) * self.group_size
-        if padded_dim > head_dim:
-            flat = torch.nn.functional.pad(flat, (0, padded_dim - head_dim))
-        num_groups = padded_dim // self.group_size
-        grouped = flat.reshape(-1, num_groups, self.group_size)
-
-        sc = scales.reshape(-1, num_groups).unsqueeze(-1)  # (N, G, 1)
-        rescaled = grouped * sc
-        rescaled_flat = rescaled.reshape(-1, padded_dim).narrow(-1, 0, head_dim)
-        rescaled_out = rescaled_flat.reshape(original_shape)
-
-        # 4. Inverse rotation
-        result = self._rotate(rescaled_out, inverse=True)
-        return result.to(torch.float16)
-
-    # ------------------------------------------------------------------
-    # Rotation
-    # ------------------------------------------------------------------
-
-    def _rotate(self, x: torch.Tensor, inverse: bool = False) -> torch.Tensor:
-        """Apply rotation (or inverse rotation) to last dimension.
-
-        Args:
-            x: Tensor with last dim == head_dim.
-            inverse: If True, apply Πᵀ (inverse rotation).
-
-        Returns:
-            Rotated tensor of same shape.
-        """
-        if self.use_hadamard:
-            try:
-                from turboquant.kernels.hadamard import randomized_hadamard_transform
-
-                return randomized_hadamard_transform(x, seed=self.seed, inverse=inverse)
-            except ImportError:
-                log.debug("hadamard_kernel_unavailable_fallback")
-
-        pi = self._pi().to(x.device)
-        if inverse:
-            return x @ pi  # Π^T @ Π = I, so x @ Π = x_rot @ Π
-        return x @ pi.T
-
-    # ------------------------------------------------------------------
-    # Calibration
-    # ------------------------------------------------------------------
-
-    def calibrate(self, calibration_data: list[torch.Tensor]) -> None:
-        """Calibrate codebook from real KV-cache data.
-
-        Fits Beta distribution parameters via MLE (or Method of Moments
-        if scipy is unavailable) on the absolute normalised values from
-        the calibration data, then recomputes the Lloyd-Max codebook.
-
-        Args:
-            calibration_data: List of tensors with last dimension = head_dim.
-
-        Raises:
-            ValueError: If *calibration_data* is empty.
-        """
-        if not calibration_data:
-            raise ValueError("calibration_data must be a non-empty list of tensors.")
-
-        all_vals: list[torch.Tensor] = []
-        pi = self._pi().to(calibration_data[0].device)
-        for tensor in calibration_data:
-            t = tensor.float()
-            t_rot = t @ pi.T
-            all_vals.append(t_rot.abs().reshape(-1))
-
-        merged = torch.cat(all_vals)
-        if merged.numel() == 0:
-            return
-
-        # Normalise to [0, 1] approximately
-        max_val = merged.max().item()
-        normalised = (merged / max(max_val, 1e-12)).clamp(1e-6, 1.0 - 1e-6)
-        np_vals = normalised.cpu().numpy()
-
-        if _HAS_SCIPY:
-            a, b, _, _ = _scipy_beta.fit(np_vals, floc=0, fscale=1)
-        else:
-            mean_ = float(np_vals.mean())
-            var_ = float(np_vals.var())
-            var_ = max(var_, 1e-12)
-            common = (mean_ * (1.0 - mean_) / var_) - 1.0
-            common = max(common, 1e-6)
-            a = mean_ * common
-            b = (1.0 - mean_) * common
-
-        # Compute MSE before recalibration
-        old_mse = self._estimate_mse(merged)
-
-        # Update codebook
-        levels, boundaries = self._init_codebook(a, b)
-        self._beta_alpha().fill_(a)
-        self._beta_beta().fill_(b)
-        lvl = self._levels()
-        bnd = self._boundaries()
-        lvl.copy_(levels.to(lvl.device))
-        bnd.copy_(boundaries.to(bnd.device))
-        self._calibrated().fill_(1)
-
-        new_mse = self._estimate_mse(merged)
-
-        log.info(
-            "calibrate",
-            alpha=round(a, 4),
-            beta=round(b, 4),
-            mse_before=round(old_mse, 6),
-            mse_after=round(new_mse, 6),
-            improvement=f"{(1 - new_mse / max(old_mse, 1e-15)) * 100:.1f}%",
-            n_samples=merged.numel(),
-        )
-
-    def _estimate_mse(self, values: torch.Tensor) -> float:
-        """Estimate quantization MSE on a flat tensor of absolute values."""
-        bnd = self._boundaries().to(values.device)
-        lvl = self._levels().to(values.device)
-        # Simple uniform quantization approximation
-        sample = values[:10000] if values.numel() > 10000 else values
-        normalised = (sample / sample.max().clamp(min=1e-12) * 3.5).clamp(-3.5, 3.5)
-        indices = torch.searchsorted(bnd, normalised).clamp(0, self.num_levels - 1)
-        recon = lvl[indices]
-        return float(((normalised - recon) ** 2).mean().item())
-
-    # ------------------------------------------------------------------
-    # Compression ratio
-    # ------------------------------------------------------------------
-
-    def compression_ratio(self) -> dict[str, float]:
-        """Return theoretical and actual compression ratios.
-
-        Returns:
-            Dict with keys ``theoretical``, ``actual``, ``overhead_scales_pct``.
-        """
-        bits_per_val = self.bits
-        fp16_bits = 16
+    def memory_footprint_bytes(self, seq_len: int, batch: int, heads: int) -> int:
+        packed_bytes = math.ceil(self.head_dim * 3 / 8)
         num_groups = math.ceil(self.head_dim / self.group_size)
-        scale_bits_per_val = (num_groups * 32) / self.head_dim  # float32 per group
-
-        theoretical = fp16_bits / bits_per_val
-        actual = fp16_bits / (bits_per_val + scale_bits_per_val)
-        overhead = scale_bits_per_val / (bits_per_val + scale_bits_per_val) * 100
-
-        return {
-            "theoretical": round(theoretical, 2),
-            "actual": round(actual, 2),
-            "overhead_scales_pct": round(overhead, 2),
-        }
-
-    # ------------------------------------------------------------------
-    # Save / Load calibration
-    # ------------------------------------------------------------------
-
-    def save_calibration(self, path: str) -> None:
-        """Save calibration data (codebook, rotation, Beta params).
-
-        Args:
-            path: File path (safetensors format).
-
-        Raises:
-            ImportError: If safetensors is not installed.
-        """
-        if not _HAS_SAFETENSORS:
-            raise ImportError("safetensors is required. Install: pip install safetensors")
-        tensors = {
-            "levels": self._levels().cpu(),
-            "boundaries": self._boundaries().cpu(),
-            "beta_alpha": self._beta_alpha().cpu().unsqueeze(0),
-            "beta_beta": self._beta_beta().cpu().unsqueeze(0),
-            "calibrated": self._calibrated().cpu().unsqueeze(0).float(),
-            "Pi": self._pi().cpu(),
-        }
-        p = Path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        save_file(tensors, str(p))
-
-        # Save metadata alongside
-        meta = {
-            "head_dim": self.head_dim,
-            "bits": self.bits,
-            "group_size": self.group_size,
-            "seed": self.seed,
-            "num_levels": self.num_levels,
-        }
-        meta_path = p.with_suffix(".json")
-        meta_path.write_text(json.dumps(meta, indent=2))
-
-        log.info("save_calibration", path=str(p))
-
-    def load_calibration(self, path: str) -> None:
-        """Load calibration data and validate compatibility.
-
-        Args:
-            path: Path to safetensors file.
-
-        Raises:
-            ImportError: If safetensors is not installed.
-            FileNotFoundError: If file does not exist.
-            ValueError: If head_dim does not match.
-        """
-        if not _HAS_SAFETENSORS:
-            raise ImportError("safetensors is required. Install: pip install safetensors")
-        p = Path(path)
-        if not p.exists():
-            raise FileNotFoundError(f"Calibration file not found: {path}")
-
-        # Validate metadata if present
-        meta_path = p.with_suffix(".json")
-        if meta_path.exists():
-            meta = json.loads(meta_path.read_text())
-            if meta.get("head_dim") != self.head_dim:
-                raise ValueError(
-                    f"head_dim mismatch: file has {meta['head_dim']}, config has {self.head_dim}"
-                )
-
-        tensors = load_file(str(p))
-        lvl = self._levels()
-        bnd = self._boundaries()
-        a = self._beta_alpha()
-        b = self._beta_beta()
-        c = self._calibrated()
-        pimat = self._pi()
-        lvl.copy_(tensors["levels"].to(lvl.device))
-        bnd.copy_(tensors["boundaries"].to(bnd.device))
-        a.copy_(tensors["beta_alpha"].squeeze())
-        b.copy_(tensors["beta_beta"].squeeze())
-        c.fill_(int(tensors["calibrated"].squeeze().item()))
-        if "Pi" in tensors:
-            pimat.copy_(tensors["Pi"].to(pimat.device))
-
-        log.info("load_calibration", path=str(p))
-
-    # ------------------------------------------------------------------
-    # Repr
-    # ------------------------------------------------------------------
+        scale_bytes = num_groups * 4 # float32
+        return (packed_bytes + scale_bytes) * seq_len * batch * heads
 
     def extra_repr(self) -> str:
-        """Extra repr for ``print(module)``."""
-        cal = bool(self._calibrated().item())
-        return (
-            f"head_dim={self.head_dim}, bits={self.bits}, "
-            f"group_size={self.group_size}, seed={self.seed}, "
-            f"calibrated={cal}, use_hadamard={self.use_hadamard}"
-        )
-
-
-# ======================================================================
-# Utilities
-# ======================================================================
-
-
-def _is_power_of_2(n: int) -> bool:
-    """Check if *n* is a positive power of 2."""
-    return n > 0 and (n & (n - 1)) == 0
+        return f"head_dim={self.head_dim}, bits={self.bits}, group_size={self.group_size}, use_hadamard={self.use_hadamard}"

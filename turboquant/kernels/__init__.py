@@ -1,23 +1,23 @@
-"""Kernel helpers for TurboQuant."""
+"""Kernel helpers for TurboQuant v0.3.0."""
 
 from turboquant.kernels.hadamard import (
-    benchmark_hadamard_vs_matmul,
-    fwht_iterative,
+    hadamard_transform,
+    hadamard_transform_padded,
     randomized_hadamard_transform,
+    benchmark_hadamard_vs_matmul,
 )
 from turboquant.kernels.triton_quant import (
     HAS_TRITON,
     benchmark_triton_kernels,
-    dequantize_3bit_triton,
-    quantize_3bit_triton,
+    dequant_3bit,
 )
 
 __all__ = [
     "HAS_TRITON",
+    "hadamard_transform",
+    "hadamard_transform_padded",
+    "randomized_hadamard_transform",
     "benchmark_hadamard_vs_matmul",
     "benchmark_triton_kernels",
-    "dequantize_3bit_triton",
-    "fwht_iterative",
-    "quantize_3bit_triton",
-    "randomized_hadamard_transform",
+    "dequant_3bit",
 ]
