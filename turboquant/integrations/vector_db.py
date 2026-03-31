@@ -20,8 +20,8 @@ from turboquant.core.turboquant import TurboQuantConfig, TurboQuantKVCache
 class CompressedVectors:
     """Compressed embedding block container."""
 
-    packed: np.ndarray[Any, np.dtype[Any]]
-    scales: np.ndarray[Any, np.dtype[Any]]
+    packed: np.ndarray[Any, np.dtype[np.uint8]]
+    scales: np.ndarray[Any, np.dtype[np.float32]]
     original_shape: tuple[int, int]
     original_dtype: np.dtype[Any]
     metadata: dict[str, Any]
@@ -40,22 +40,26 @@ class TurboQuantVectorAdapter(abc.ABC):
     """Abstract base adapter for compressed vector backends."""
 
     @abc.abstractmethod
-    def compress_embeddings(self, vectors: np.ndarray[Any, np.dtype[Any]]) -> CompressedVectors:
+    def compress_embeddings(
+        self, vectors: np.ndarray[Any, np.dtype[np.float32]]
+    ) -> CompressedVectors:
         raise RuntimeError("Abstract method")
 
     @abc.abstractmethod
     def decompress_embeddings(
         self, compressed: CompressedVectors
-    ) -> np.ndarray[Any, np.dtype[Any]]:
+    ) -> np.ndarray[Any, np.dtype[np.float32]]:
         raise RuntimeError("Abstract method")
 
     @abc.abstractmethod
-    def search(self, query: np.ndarray[Any, np.dtype[Any]], top_k: int) -> list[SearchResult]:
+    def search(
+        self, query: np.ndarray[Any, np.dtype[np.float32]], top_k: int
+    ) -> list[SearchResult]:
         raise RuntimeError("Abstract method")
 
     @abc.abstractmethod
     def search_async(
-        self, query: np.ndarray[Any, np.dtype[Any]], top_k: int
+        self, query: np.ndarray[Any, np.dtype[np.float32]], top_k: int
     ) -> Awaitable[list[SearchResult]]:
         raise RuntimeError("Abstract method")
 
@@ -82,7 +86,7 @@ class InMemoryTurboQuant(TurboQuantVectorAdapter):
     def add(
         self,
         ids: list[str],
-        embeddings: np.ndarray[Any, np.dtype[Any]],
+        embeddings: np.ndarray[Any, np.dtype[np.float32]],
         metadatas: list[dict[str, Any]] | None = None,
     ) -> None:
         if embeddings.ndim != 2:
@@ -94,7 +98,9 @@ class InMemoryTurboQuant(TurboQuantVectorAdapter):
         self._raw_nbytes = int(embeddings.nbytes)
         self._compressed = self.compress_embeddings(embeddings)
 
-    def compress_embeddings(self, vectors: np.ndarray[Any, np.dtype[Any]]) -> CompressedVectors:
+    def compress_embeddings(
+        self, vectors: np.ndarray[Any, np.dtype[np.float32]]
+    ) -> CompressedVectors:
         if vectors.ndim != 2:
             raise ValueError("vectors must be 2D")
         n, d = vectors.shape
@@ -103,8 +109,13 @@ class InMemoryTurboQuant(TurboQuantVectorAdapter):
             self.tq_config.head_dim = d
             self.cache = TurboQuantKVCache(self.tq_config)
 
+        # Reshape for KV cache compression
         tensor = torch.from_numpy(vectors.astype(np.float32)).unsqueeze(1).unsqueeze(1)
         entry = self.cache.compress(tensor, tensor)
+        from turboquant.core.turboquant import CacheEntry
+
+        if not isinstance(entry, CacheEntry):
+            raise TypeError(f"Vector DB requires standard CacheEntry, got {type(entry)}")
         packed, scales = entry.compressed_keys
         compressed = CompressedVectors(
             packed=packed.cpu().numpy(),
@@ -121,18 +132,24 @@ class InMemoryTurboQuant(TurboQuantVectorAdapter):
 
     def decompress_embeddings(
         self, compressed: CompressedVectors
-    ) -> np.ndarray[Any, np.dtype[Any]]:
+    ) -> np.ndarray[Any, np.dtype[np.float32]]:
         n, d = compressed.original_shape
         packed = torch.from_numpy(compressed.packed)
         scales = torch.from_numpy(compressed.scales)
-        # Fix: PolarQuantizer.dequantize takes only 2 arguments in v0.3.0
-        restored = self.cache.quantizer.dequantize(
+
+        # Accessing the internal quantizer correctly
+        restored = self.cache.polar.dequantize(
             packed.to(self.cache.device), scales.to(self.cache.device)
         )
         # Handle original shape correctly during decompression
-        return restored.squeeze(1).squeeze(1).cpu().numpy().astype(np.float32)
+        res: np.ndarray[Any, np.dtype[np.float32]] = (
+            restored.squeeze(1).squeeze(1).cpu().numpy().astype(np.float32)
+        )
+        return res
 
-    def search(self, query: np.ndarray[Any, np.dtype[Any]], top_k: int) -> list[SearchResult]:
+    def search(
+        self, query: np.ndarray[Any, np.dtype[np.float32]], top_k: int
+    ) -> list[SearchResult]:
         if self._compressed is None:
             return []
         vectors = self.decompress_embeddings(self._compressed)
@@ -150,7 +167,7 @@ class InMemoryTurboQuant(TurboQuantVectorAdapter):
         return out
 
     def search_async(
-        self, query: np.ndarray[Any, np.dtype[Any]], top_k: int
+        self, query: np.ndarray[Any, np.dtype[np.float32]], top_k: int
     ) -> Awaitable[list[SearchResult]]:
         loop = asyncio.get_running_loop()
         return loop.run_in_executor(None, lambda: self.search(query, top_k))
@@ -188,7 +205,7 @@ class ChromaDBTurboQuant(InMemoryTurboQuant):
     def add(
         self,
         ids: list[str],
-        embeddings: np.ndarray[Any, np.dtype[Any]],
+        embeddings: np.ndarray[Any, np.dtype[np.float32]],
         metadatas: list[dict[str, Any]] | None = None,
     ) -> None:
         super().add(ids, embeddings, metadatas)
@@ -221,7 +238,7 @@ class QdrantTurboQuant(InMemoryTurboQuant):
     def upsert(
         self,
         ids: list[str],
-        embeddings: np.ndarray[Any, np.dtype[Any]],
+        embeddings: np.ndarray[Any, np.dtype[np.float32]],
         payloads: list[dict[str, Any]] | None = None,
     ) -> None:
         super().add(ids, embeddings, payloads)
@@ -266,8 +283,11 @@ def benchmark_vector_db(
 ) -> dict[str, float]:
     """Benchmark indexing/search speed, memory, recall and compression ratio."""
     rng = np.random.default_rng(42)
-    vectors = rng.standard_normal((dataset_size, dim), dtype=np.float32)
-    query = rng.standard_normal((dim,), dtype=np.float32)
+    # npt.NDArray can be used as well, but np.ndarray[Any, np.dtype[...]] is more standard for --strict
+    vectors: np.ndarray[Any, np.dtype[np.float32]] = rng.standard_normal(
+        (dataset_size, dim), dtype=np.float32
+    )
+    query: np.ndarray[Any, np.dtype[np.float32]] = rng.standard_normal((dim,), dtype=np.float32)
 
     ids = [str(uuid.uuid4()) for _ in range(dataset_size)]
 

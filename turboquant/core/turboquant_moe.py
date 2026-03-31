@@ -16,7 +16,7 @@ import structlog
 import torch
 import torch.nn as nn
 
-from turboquant.core.adaptive_bitwidth import AdaptiveBitwithConfig
+from turboquant.core.adaptive_bitwidth import AdaptiveBitwithConfig, AdaptiveCompressedCache
 from turboquant.core.cross_layer_kv import CrossLayerConfig
 from turboquant.core.expert_predictor import ExpertPredictor, ExpertPredictorConfig
 from turboquant.core.markov_prefetch import MarkovPrefetchConfig, MarkovTrajectoryPredictor
@@ -171,7 +171,7 @@ class TurboQuantMoEConfig:
 class MoEStepOutput:
     """Output of a single unified MoE step."""
 
-    cache_entry: CacheEntry
+    cache_entry: CacheEntry | AdaptiveCompressedCache
     router_output: RouterOutput
     active_experts: list[int]
     predicted_experts: list[int]

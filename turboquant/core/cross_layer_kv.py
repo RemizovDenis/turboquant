@@ -6,12 +6,12 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
-import numpy as np
 import structlog
 import torch
 import torch.nn.functional as functional
 
-from turboquant.core.polar_quant import PolarQuantizer
+from turboquant.core.adaptive_bitwidth import AdaptiveCompressedCache
+from turboquant.core.polar_quant import PolarQuantConfig, PolarQuantizer
 from turboquant.core.turboquant import CacheEntry, TurboQuantKVCache
 
 LOGGER = structlog.get_logger(__name__)
@@ -50,7 +50,7 @@ class CrossLayerCacheEntry:
     anchor_layer_id: int
     layer_id: int
     is_anchor: bool
-    anchor_entry: CacheEntry | None
+    anchor_entry: CacheEntry | AdaptiveCompressedCache | None
     delta_packed: torch.Tensor | None
     delta_scales: torch.Tensor | None
     delta_norm_ratio: float
@@ -78,11 +78,16 @@ class CrossLayerKVCache:
         )
         self.anchor_assignments = self._build_initial_assignments()
 
-        self.delta_quantizer = PolarQuantizer(
-            base_quantizer.config.head_dim, base_quantizer.config.bits
-        ).to(base_quantizer.device)
+        delta_cfg = PolarQuantConfig(
+            head_dim=base_quantizer.config.head_dim,
+            bits=config.delta_bits,
+            group_size=config.delta_group_size,
+            seed=base_quantizer.config.seed + 17,
+            use_hadamard=base_quantizer.config.use_hadamard,
+        )
+        self.delta_quantizer = PolarQuantizer(delta_cfg).to(base_quantizer.device)
         self.entries: dict[int, CrossLayerCacheEntry] = {}
-        self.anchor_entries: dict[int, CacheEntry] = {}
+        self.anchor_entries: dict[int, CacheEntry | AdaptiveCompressedCache] = {}
         self._lock = threading.RLock()
         self._step_count = 0
         self._logger = LOGGER.bind(component="CrossLayerKVCache")
@@ -99,6 +104,8 @@ class CrossLayerKVCache:
         layer_id: int,
         keys: torch.Tensor,
         values: torch.Tensor,
+        token_ids: torch.Tensor | None = None,
+        attention_entropy: torch.Tensor | None = None,
     ) -> CrossLayerCacheEntry:
         """Compress KV for a layer as anchor or delta.
 
@@ -106,6 +113,8 @@ class CrossLayerKVCache:
             layer_id: Layer index.
             keys: Key tensor `[batch, heads, seq, dim]`.
             values: Value tensor `[batch, heads, seq, dim]`.
+            token_ids: Optional token IDs for adaptive classification.
+            attention_entropy: Optional attention entropy for adaptive bitwidth.
 
         Returns:
             :class:`CrossLayerCacheEntry` for the layer.
@@ -115,7 +124,13 @@ class CrossLayerKVCache:
             original_shape = list(keys.shape)
 
             if layer_id == anchor_layer or anchor_layer not in self.anchor_entries:
-                anchor_entry = self.base_quantizer.compress(keys, values)
+                anchor_entry = self.base_quantizer.compress(
+                    keys, values, token_ids=token_ids, attention_entropy=attention_entropy
+                )
+                metadata: dict[str, Any] = {
+                    "original_shape": original_shape,
+                    "fallback_anchor": False,
+                }
                 out = CrossLayerCacheEntry(
                     anchor_layer_id=layer_id,
                     layer_id=layer_id,
@@ -124,7 +139,7 @@ class CrossLayerKVCache:
                     delta_packed=None,
                     delta_scales=None,
                     delta_norm_ratio=0.0,
-                    metadata={"original_shape": original_shape, "fallback_anchor": False},
+                    metadata=metadata,
                 )
                 self.entries[layer_id] = out
                 self.anchor_entries[layer_id] = anchor_entry
@@ -192,11 +207,6 @@ class CrossLayerKVCache:
             ):
                 self.adapt_anchors()
             return entry
-
-    def _query_batch(
-        self, query: np.ndarray[Any, np.dtype[Any]], top_k: int
-    ) -> np.ndarray[Any, np.dtype[Any]]:
-        return np.zeros((len(query), top_k), dtype=np.int64)
 
     def decompress(self, entry: CrossLayerCacheEntry) -> tuple[torch.Tensor, torch.Tensor]:
         """Decompress cross-layer cache entry."""
@@ -295,41 +305,49 @@ class CrossLayerKVCache:
 
                 if entry.is_anchor and entry.anchor_entry is not None:
                     mem = self.base_quantizer.memory_usage(entry.anchor_entry)
-                    layer_mb = float(mem["total_mb"])
-                    report[f"layer_{layer_id}_anchor_mb"] = layer_mb
+                    layer_bytes = float(mem["total_bytes"])
+                    report[f"layer_{layer_id}_anchor_mb"] = layer_bytes / (1024**2)
                 else:
-                    delta_bytes = 0
+                    layer_bytes = 0.0
                     if entry.delta_packed is not None:
-                        delta_bytes += int(
+                        layer_bytes += float(
                             entry.delta_packed.numel() * entry.delta_packed.element_size()
                         )
                     if entry.delta_scales is not None:
-                        delta_bytes += int(
+                        layer_bytes += float(
                             entry.delta_scales.numel() * entry.delta_scales.element_size()
                         )
-                    layer_mb = delta_bytes / (1024**2)
-                    report[f"layer_{layer_id}_delta_mb"] = layer_mb
+                    report[f"layer_{layer_id}_delta_mb"] = layer_bytes / (1024**2)
+
+                layer_mb = layer_bytes / (1024**2)
                 report[f"layer_{layer_id}_total_mb"] = layer_mb
                 report[f"layer_{layer_id}_vs_baseline_mb"] = layer_baseline
                 total_mb += layer_mb
 
             report["total_mb"] = total_mb
             report["baseline_mb"] = baseline_mb
-            report["total_compression_ratio"] = total_mb / max(1e-8, baseline_mb)
+            report["total_compression_ratio"] = baseline_mb / max(1e-8, total_mb)
             return report
 
     def warmup(self, sample_keys: list[torch.Tensor], sample_values: list[torch.Tensor]) -> None:
-        """Warm similarity matrix and anchor assignments from sample batches."""
-        del sample_values  # similarity currently measured on keys only
+        """Warm similarity matrix and anchor assignments from sample batches.
+
+        Args:
+            sample_keys: List of sample key tensors for each layer.
+            sample_values: List of sample value tensors for each layer.
+        """
         if len(sample_keys) < 2:
             return
         with self._lock:
             max_layer = min(self.config.num_layers, len(sample_keys))
+            # Similarity is primarily driven by keys in v0.3.0 as it determines
+            # the attention structure, but we process both for completeness.
             for layer in range(1, max_layer):
                 prev = sample_keys[layer - 1]
                 cur = sample_keys[layer]
+                # measure_similarity currently uses keys only, which is standard for CL-KV
                 self.measure_similarity(layer - 1, layer, prev, cur)
+
             if self.config.adaptive_anchors:
                 self.adapt_anchors()
-            if self.config.adaptive_anchors:
-                self.adapt_anchors()
+            self._logger.info("cross_layer_warmup_complete", layers=max_layer)

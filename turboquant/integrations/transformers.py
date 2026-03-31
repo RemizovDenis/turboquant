@@ -21,7 +21,12 @@ import structlog
 import torch
 
 from turboquant.core.moe_router import RouterOutput
-from turboquant.core.turboquant import CacheEntry, TurboQuantConfig, TurboQuantKVCache
+from turboquant.core.turboquant import (
+    AdaptiveCompressedCache,
+    CacheEntry,
+    TurboQuantConfig,
+    TurboQuantKVCache,
+)
 from turboquant.core.turboquant_moe import TurboQuantMoE, TurboQuantMoEConfig
 
 LOGGER = structlog.get_logger(__name__)
@@ -42,7 +47,7 @@ class TurboQuantCache:
     def __init__(self, tq_cache: TurboQuantKVCache) -> None:
         super().__init__()
         self.tq_cache = tq_cache
-        self.entries: dict[int, CacheEntry] = {}
+        self.entries: dict[int, CacheEntry | AdaptiveCompressedCache] = {}
 
     def update(
         self,

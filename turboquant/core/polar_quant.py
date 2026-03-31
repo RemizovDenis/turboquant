@@ -135,7 +135,7 @@ class PolarQuantizer(nn.Module):
 
     def __init__(
         self,
-        head_dim: int = 128,
+        head_dim: int | PolarQuantConfig = 128,
         bits: int = 3,
         group_size: int = 64,
         seed: int = 42,

@@ -410,9 +410,10 @@ class BenchmarkRunner:
                 pair[1] = (pair[1] + 1) % cfg.num_experts
             trajectory.append((layer_id, sorted({int(pair[0]), int(pair[1])})))
 
-        warmup_history: list[list[list[int]]] = [[] for _ in range(cfg.num_layers)]
+        warmup_history: list[tuple[int, int]] = []
         for layer_id, experts in trajectory[:warmup_steps]:
-            warmup_history[layer_id].append(experts)
+            for expert_id in experts:
+                warmup_history.append((layer_id, expert_id))
         cache.warmup(warmup_history)
         cache.reset_stats()
 

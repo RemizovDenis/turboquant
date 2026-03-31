@@ -16,7 +16,11 @@ import torch
 import torch.nn.functional as F  # noqa: N812
 
 from turboquant.core.qjl import QJLResidualCorrector
-from turboquant.core.turboquant import CacheEntry, TurboQuantKVCache
+from turboquant.core.turboquant import (
+    AdaptiveCompressedCache,
+    CacheEntry,
+    TurboQuantKVCache,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -95,7 +99,7 @@ class SpeculativePrefillEngine:
 
     def speculative_compress(
         self, keys: torch.Tensor, values: torch.Tensor, prompt_id: str | None = None
-    ) -> tuple[CacheEntry, dict[str, float]]:
+    ) -> tuple[CacheEntry | AdaptiveCompressedCache, dict[str, float]]:
         """Attempt speculative compression using stored draft."""
         self._total_calls += 1
 
