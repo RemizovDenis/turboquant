@@ -8,7 +8,6 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import cast
 
 import structlog
 import torch
@@ -170,7 +169,13 @@ class AdaptiveQJLCorrector(nn.Module):
 
     def encode_with_importance(
         self, residual: torch.Tensor, importance_scores: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
         """Vectorized importance-based routing."""
         high_mask = importance_scores > 0.7
         res_high = residual[high_mask]
