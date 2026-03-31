@@ -1,21 +1,19 @@
 # TurboQuant-MoE v0.3.0
 
-High-Performance KV-Cache Compression & Cryptographic Watermarking for LLMs.
-Includes 3-bit PolarQuant, 14x memory reduction, and HMAC-seeded LSB watermarking.
+High-performance KV-Cache compression and cryptographic watermarking for large language models. Features 3-bit PolarQuant, 14x memory reduction, and HMAC-seeded LSB watermarking.
 
-## Dual Licensing Model
+## Licensing
 
-TurboQuant-MoE is released under a strict dual-licensing model for project stability and commercial sustainability:
+TurboQuant-MoE uses a dual-licensing model:
 
--   **GNU AGPLv3**: For open-source, non-commercial, and educational use. Any derivative works or network deployments must remain open-source.
--   **Commercial License**: Required for all proprietary integrations, closed-source SaaS platforms, and internal enterprise architectures.
+-   **GNU AGPLv3**: For open-source and non-commercial use.
+-   **Commercial License**: Required for proprietary integrations and closed-source SaaS platforms. (See [COMMERCIAL-LICENSE.md](./COMMERCIAL-LICENSE.md))
 
-For commercial procurement and support:
-📩 **Email**: [sales@securilayer.dev](mailto:sales@securilayer.dev) | 📱 **Telegram**: [@nofaith7](https://t.me/nofaith7)
+Procurement & Support: [sales@securilayer.dev](mailto:sales@securilayer.dev) | Telegram: @nofaith7
 
 ---
 
-## Key Features in v0.3.0
+## Key Features
 
 - **True 3-bit PolarQuant**: Physical bit-packing (8x3-bit into 3 bytes) achieving 5.8x-6.0x compression of base KV storage with <0.1% accuracy drop.
 - **Cross-Layer KV Delta (14x Compression)**: Next-gen backend that stores 3-bit anchor layers and 1-bit signed deltas for intermediate layers.
