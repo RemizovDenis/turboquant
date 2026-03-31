@@ -26,6 +26,9 @@
 | **Expert Load Latency** | **< 0.5 ms** | - | - |
 | **Hidden IO Ratio** | **100%** | - | Perfect |
 
+> [!NOTE]
+> All metrics measured on synthetic correlated KV tensors and reconstructed weights using `benchmark_ultimate.py` with CPU fallback/CUDA simulation context.
+
 ## Quick Start
 
 ```bash
