@@ -1,17 +1,15 @@
-# TurboQuant-MoE v0.3.0
+# TurboQuant-MoE v0.3.0 🛡️🏁
 
-High-performance KV-Cache compression and cryptographic watermarking for large language models. Features 3-bit PolarQuant, 14x memory reduction, and HMAC-seeded LSB watermarking.
-
-## Licensing
-
-TurboQuant-MoE uses a dual-licensing model:
-
--   **GNU AGPLv3**: For open-source and non-commercial use.
--   **Commercial License**: Required for proprietary integrations and closed-source SaaS platforms. (See [COMMERCIAL-LICENSE.md](./COMMERCIAL-LICENSE.md))
-
-Procurement & Support: [sales@securilayer.dev](mailto:sales@securilayer.dev) | Telegram: @nofaith7
+> [!IMPORTANT]
+> **TurboQuant-MoE is Dual-Licensed.**  
+> Standard Open Source use: **GNU AGPLv3**.  
+> Proprietary/SaaS/Enterprise use: **Commercial License Required**.
+> 
+> 📬 **Inquiries**: [sales@securilayer.dev](mailto:sales@securilayer.dev) | Telegram: [@nofaith7](https://t.me/nofaith7) | [Commercial License Details](./COMMERCIAL-LICENSE.md)
 
 ---
+
+High-performance KV-Cache compression (14x reduction), 3-bit PolarQuant, and cryptographic watermarking for state-of-the-art LLM inference.
 
 ## Key Features
 
