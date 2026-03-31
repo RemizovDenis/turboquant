@@ -1,6 +1,16 @@
 # TurboQuant-MoE v0.3.0
 
+High-Performance KV-Cache Compression & Cryptographic Watermarking for LLMs.
+Includes 3-bit PolarQuant, 14x memory reduction, and HMAC-seeded LSB watermarking.
 
+## Dual Licensing Model
+
+TurboQuant is released under a dual-licensing model to support both open-source development and professional commercial enterprise:
+
+-   **MIT License**: For open-source, educational, and personal non-commercial use.
+-   **Commercial License**: Required for integration into proprietary products, closed-source SaaS platforms, or large-scale enterprise deployments. (See [COMMERCIAL-LICENSE.md](./COMMERCIAL-LICENSE.md))
+
+---
 
 ## Key Features in v0.3.0
 
