@@ -1,9 +1,6 @@
 # TurboQuant-MoE v0.3.0
 
-[![PyPI](https://img.shields.io/pypi/v/turboquant-moe.svg)](https://pypi.org/project/turboquant-moe/) [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/) [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE) [![arXiv](https://img.shields.io/badge/arXiv-2504.19874-b31b1b.svg)](https://arxiv.org/abs/2504.19874)
 
-> **World-class KV-cache compression (11-14x) and production MoE serving.**
-> v0.3.0 introduces true 3-bit packed storage, cross-layer delta compression, and speculative prefill.
 
 ## Key Features in v0.3.0
 
