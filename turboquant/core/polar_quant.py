@@ -268,7 +268,7 @@ class PolarQuantizer(nn.Module):
         )
         indices = indices.view(normalised.shape).to(torch.int8)
         indices_flat = indices.view(-1, num_groups * self.group_size)[..., :dim]
-        
+
         if self.bits == 1:
             packed = _pack_1bit(indices_flat)
         elif self.bits == 2:

@@ -36,7 +36,7 @@ class TestPolarQuantizer:
         # 64 dims * 3 bits / 8 bits-per-byte = 24 bytes
         assert quantized.shape == (2, 4, 16, 24)
         assert quantized.dtype == torch.uint8
-        assert scales.dtype == torch.float32
+        assert scales.dtype == torch.float16
 
     def test_forward_empty(self):
         from turboquant.core.polar_quant import PolarQuantizer

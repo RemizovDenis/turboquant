@@ -213,7 +213,6 @@ class CrossLayerKVCache:
                 raise KeyError(f"Missing anchor entry for layer {entry.anchor_layer_id}")
 
             anchor_k, anchor_v = self.base_quantizer.decompress(anchor_entry)
-            shape = tuple(int(x) for x in entry.metadata["original_shape"])
             delta_k = self.delta_quantizer.dequantize(entry.delta_packed[0], entry.delta_scales[0])
             delta_v = self.delta_quantizer.dequantize(entry.delta_packed[1], entry.delta_scales[1])
             return (
