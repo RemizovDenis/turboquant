@@ -6,12 +6,11 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
-import numpy as np
 import structlog
 import torch
 import torch.nn.functional as functional
 
-from turboquant.core.polar_quant import PolarQuantizer
+from turboquant.core.polar_quant import PolarQuantConfig, PolarQuantizer
 from turboquant.core.turboquant import CacheEntry, TurboQuantKVCache
 
 LOGGER = structlog.get_logger(__name__)
@@ -78,9 +77,14 @@ class CrossLayerKVCache:
         )
         self.anchor_assignments = self._build_initial_assignments()
 
-        self.delta_quantizer = PolarQuantizer(
-            base_quantizer.config.head_dim, base_quantizer.config.bits
-        ).to(base_quantizer.device)
+        delta_cfg = PolarQuantConfig(
+            head_dim=base_quantizer.config.head_dim,
+            bits=config.delta_bits,
+            group_size=config.delta_group_size,
+            seed=base_quantizer.config.seed + 17,
+            use_hadamard=base_quantizer.config.use_hadamard,
+        )
+        self.delta_quantizer = PolarQuantizer(delta_cfg).to(base_quantizer.device)
         self.entries: dict[int, CrossLayerCacheEntry] = {}
         self.anchor_entries: dict[int, CacheEntry] = {}
         self._lock = threading.RLock()
@@ -116,6 +120,10 @@ class CrossLayerKVCache:
 
             if layer_id == anchor_layer or anchor_layer not in self.anchor_entries:
                 anchor_entry = self.base_quantizer.compress(keys, values)
+                metadata: dict[str, Any] = {
+                    "original_shape": original_shape,
+                    "fallback_anchor": False,
+                }
                 out = CrossLayerCacheEntry(
                     anchor_layer_id=layer_id,
                     layer_id=layer_id,
@@ -124,7 +132,7 @@ class CrossLayerKVCache:
                     delta_packed=None,
                     delta_scales=None,
                     delta_norm_ratio=0.0,
-                    metadata={"original_shape": original_shape, "fallback_anchor": False},
+                    metadata=metadata,
                 )
                 self.entries[layer_id] = out
                 self.anchor_entries[layer_id] = anchor_entry
@@ -192,11 +200,6 @@ class CrossLayerKVCache:
             ):
                 self.adapt_anchors()
             return entry
-
-    def _query_batch(
-        self, query: np.ndarray[Any, np.dtype[Any]], top_k: int
-    ) -> np.ndarray[Any, np.dtype[Any]]:
-        return np.zeros((len(query), top_k), dtype=np.int64)
 
     def decompress(self, entry: CrossLayerCacheEntry) -> tuple[torch.Tensor, torch.Tensor]:
         """Decompress cross-layer cache entry."""
@@ -329,7 +332,5 @@ class CrossLayerKVCache:
                 prev = sample_keys[layer - 1]
                 cur = sample_keys[layer]
                 self.measure_similarity(layer - 1, layer, prev, cur)
-            if self.config.adaptive_anchors:
-                self.adapt_anchors()
             if self.config.adaptive_anchors:
                 self.adapt_anchors()

@@ -135,7 +135,7 @@ class PolarQuantizer(nn.Module):
 
     def __init__(
         self,
-        head_dim: int = 128,
+        head_dim: int | PolarQuantConfig = 128,
         bits: int = 3,
         group_size: int = 64,
         seed: int = 42,
@@ -312,7 +312,11 @@ class PolarQuantizer(nn.Module):
         elif self.bits == 2:
             indices = _unpack_2bit(packed, self.head_dim)
         elif self.bits == 3:
-            indices = _unpack_3bit(packed, self.head_dim)
+            from .triton_ops import packed_3bit_dequant_torch
+
+            return cast(
+                torch.Tensor, packed_3bit_dequant_torch(packed, scales, self.levels, self.head_dim)
+            )
         else:
             indices = packed.to(torch.int8)
 

@@ -133,11 +133,7 @@ class AdaptiveBitwidthQuantizer:
             embedding_dim=config.classifier_embedding_dim,
         ).to(self.device)
         self.quantizers: dict[int, PolarQuantizer] = {
-            bits: PolarQuantizer(
-                head_dim=config.head_dim,
-                bits=bits,
-                device=str(config.device),
-            ).to(self.device)
+            bits: PolarQuantizer(head_dim=config.head_dim, bits=bits).to(self.device)
             for bits in range(config.min_bits, config.max_bits + 1)
         }
         self._compress_count = 0
