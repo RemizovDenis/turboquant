@@ -170,7 +170,9 @@ class DynamicExpertCache:
             if key in self._gpu_experts:
                 del self._gpu_experts[key]
 
-    def prefetch_experts(self, expert_ids: list[int], layer_id: int, priority: float = 1.0) -> Future:
+    def prefetch_experts(
+        self, expert_ids: list[int], layer_id: int, priority: float = 1.0
+    ) -> Future:
         """Prefetch multiple experts asynchronously."""
         for eid in expert_ids:
             self.prefetch(eid, layer_id)

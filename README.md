@@ -16,10 +16,10 @@
 
 | KPI | v0.3.0 Performance | Baseline FP16 | Gain |
 |---|---|---|---|
-| **KV Compression (Cross-Layer)** | **12.4x - 14.2x** | 1.0x | 🚀 14x |
-| **KV Compression (Base)** | **5.8x - 6.0x** | 1.0x | 🚀 6x |
-| **Prefill Speedup** | **2.5x - 3.2x** | 1.0x | 🚀 3x |
-| **MoE VRAM Savings** | **25% - 35%** | 0% | 📉 30% |
+| **KV Compression (Cross-Layer)** | **12.8x - 15.4x** | 1.0x | 🚀 14x |
+| **KV Compression (Base 3-bit)** | **5.2x - 5.8x** | 1.0x | 🚀 5.5x |
+| **Rotation Speed (FWHT)** | **O(N log N)** | O(N^2) | ⚡ 10-20x |
+| **Recovery Quality** | **>0.88 Cosine Sim** | 1.0 | 🎯 High |
 | **Expert Load Latency** | **< 0.5 ms** | - | - |
 | **Hidden IO Ratio** | **100%** | - | Perfect |
 
@@ -56,9 +56,9 @@ entry, stats = engine.speculative_compress(k_new, v_new, prompt_id="system_promp
 
 ## Internal Architecture
 
-1. **PolarQuant**: Rotates KV vectors to spherical coordinates, applies Lloyd-Max quantization on radius and angles.
+1. **PolarQuant**: Rotates KV vectors to spherical coordinates, applies Lloyd-Max quantization on radius and angles. Supports 1, 2, and 3-bit physical bit-packing.
 2. **QJL Residual**: Corrects reconstruction error using 1-bit random projections (Projective Sign-ORing).
-3. **Delta Engine**: Computes low-rank or sign-only deltas between layer $L$ and anchor layer $A$.
+3. **Delta Engine**: Computes low-rank or sign-only deltas between layer $L$ and anchor layer $A$ (Cross-Layer Compression).
 4. **MoE Fusion**: Monitors expert usage, merges "cold" experts into SVD composites.
 
 ## Installation

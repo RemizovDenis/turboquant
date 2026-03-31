@@ -40,25 +40,24 @@ def hadamard_transform(x: torch.Tensor, normalize: bool = True) -> torch.Tensor:
         ValueError: If last dim is not a power of 2.
     """
     n = x.shape[-1]
+    if n == 0:
+        return x
     if not is_power_of_two(n):
         raise ValueError(f"Last dimension must be a power of 2, got {n}")
 
     # Use float32 for internal computation to maintain precision
     orig_dtype = x.dtype
-    x = x.float()
+    x = x.float().contiguous()
 
     # Vectorized butterfly implementation
-    # Reshape and operate on blocks to avoid Python loops over n
     # The number of stages is log2(n)
     batch_shape = x.shape[:-1]
-    n = x.shape[-1]
-    # ...
     stages = int(math.log2(n))
     for stage in range(stages):
         step = 2**stage
         x = x.view(*batch_shape, -1, 2, step)
         a, b = x.unbind(dim=-2)
-        x = torch.stack([a + b, a - b], dim=-2)
+        x = torch.stack([a + b, a - b], dim=-2).contiguous()
 
     x = x.view(*batch_shape, n)
 
@@ -105,8 +104,6 @@ def randomized_hadamard_transform(
         Transformed tensor.
     """
     d = x.shape[-1]
-    next_power_of_two(d)
-
     # Generate random signs ±1
     gen = torch.Generator(device=x.device).manual_seed(seed)
     # We need n signs even if d is not n
@@ -127,9 +124,6 @@ def benchmark_hadamard_vs_matmul(head_dim: int, n_iters: int = 100) -> dict[str,
     """Benchmark FWHT vs standard matmul for a given dimension."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     x = torch.randn(1, 32, 1024, head_dim, device=device, dtype=torch.float16)
-
-    # Pre-generate rotation matrix for matmul
-    head_dim if is_power_of_two(head_dim) else next_power_of_two(head_dim)
 
     # Warmup
     for _ in range(10):

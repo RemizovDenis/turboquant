@@ -62,6 +62,10 @@ class QJLResidualCorrector(nn.Module):
         s = s / math.sqrt(k)
         return s
 
+    def compress_ratio(self) -> float:
+        """Returns the compression factor for the residual."""
+        return (self.head_dim * 16) / self.sketch_dim
+
     def encode(self, residual: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns (packed_signs, norms_float16)."""
         if residual.numel() == 0:

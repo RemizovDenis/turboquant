@@ -54,8 +54,8 @@ class KVCacheWatermarker:
         # Convert to bit tensor
         all_bytes = b"".join(bits_raw)
         bits_np = np.frombuffer(all_bytes, dtype=np.uint8)
-        # Bit decomposition
-        bits_tensor = torch.from_numpy(np.unpackbits(bits_np))[:num_bits]
+        # Bit decomposition - explicitly use little-endian to match our LSB packing
+        bits_tensor = torch.from_numpy(np.unpackbits(bits_np, bitorder="little"))[:num_bits]
         return bits_tensor.view(*scales_shape, self.config.bits_per_scale_group).to(torch.int16)
 
     def embed(self, entry: CacheEntry, sequence_id: str) -> CacheEntry:

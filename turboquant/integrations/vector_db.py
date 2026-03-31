@@ -109,7 +109,6 @@ class InMemoryTurboQuant(TurboQuantVectorAdapter):
             original_dtype=vectors.dtype,
             metadata={"n": n, "d": d},
         )
-        # Allow direct usage via compress_embeddings() without an explicit add().
         if not self._ids or len(self._ids) != n:
             self._ids = [str(uuid.uuid4()) for _ in range(n)]
             self._payloads = [{} for _ in range(n)]
@@ -120,7 +119,11 @@ class InMemoryTurboQuant(TurboQuantVectorAdapter):
         n, d = compressed.original_shape
         packed = torch.from_numpy(compressed.packed)
         scales = torch.from_numpy(compressed.scales)
-        restored = self.cache.quantizer.dequantize(packed, scales, (n, 1, 1, d))
+        # Fix: PolarQuantizer.dequantize takes only 2 arguments in v0.3.0
+        restored = self.cache.quantizer.dequantize(
+            packed.to(self.cache.device), scales.to(self.cache.device)
+        )
+        # Handle original shape correctly during decompression
         return restored.squeeze(1).squeeze(1).cpu().numpy().astype(np.float32)
 
     def search(self, query: np.ndarray, top_k: int) -> list[SearchResult]:
@@ -128,8 +131,8 @@ class InMemoryTurboQuant(TurboQuantVectorAdapter):
             return []
         vectors = self.decompress_embeddings(self._compressed)
         q = query.reshape(1, -1).astype(np.float32)
-        q = q / (np.linalg.norm(q, axis=1, keepdims=True) + 1e-8)
-        v = vectors / (np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-8)
+        q = q / (np.linalg.norm(q, axis=1, keepdims=True) + 1e-9)
+        v = vectors / (np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-9)
         sims = (v @ q.T).squeeze(-1)
         top_idx = np.argsort(-sims)[:top_k]
 

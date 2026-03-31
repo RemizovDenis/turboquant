@@ -117,11 +117,23 @@ class TurboQuantKVCache:
 
         log.info("TurboQuantKVCache.init", config=config)
 
-        if config.benchmark_on_init and "cuda" in str(self.device):
+        # Optional benchmark on init
+        if self.config.benchmark_on_init and "cuda" in str(self.device):
             from turboquant.kernels.triton_quant import benchmark_triton_kernels
 
-            bench = benchmark_triton_kernels(head_dim=config.head_dim)
+            bench = benchmark_triton_kernels(head_dim=self.config.head_dim)
             log.info("kernel_benchmark", results=bench)
+
+    def __enter__(self) -> TurboQuantKVCache:
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        pass
+
+    @property
+    def quantizer(self) -> PolarQuantizer:
+        """Legacy compatibility alias for polar quantizer."""
+        return self.polar
 
     def compress(self, keys: torch.Tensor, values: torch.Tensor) -> CacheEntry:
         """Compress keys/values with true packed 3-bit + QJL residual."""
@@ -159,6 +171,18 @@ class TurboQuantKVCache:
             )
             return entry
 
+    def update(
+        self, entry: CacheEntry, new_keys: torch.Tensor, new_values: torch.Tensor
+    ) -> CacheEntry:
+        """Update existing CacheEntry by appending new keys/values."""
+        with self._lock:
+            # For simplicity in v0.3.0, we decompress and re-compress
+            # In a production setting, this would be optimized kernel-side
+            k_old, v_old = self.decompress(entry)
+            k_new = torch.cat([k_old, new_keys.to(self.device)], dim=2)
+            v_new = torch.cat([v_old, new_values.to(self.device)], dim=2)
+            return self.compress(k_new, v_new)
+
     def compress_async(
         self, keys: torch.Tensor, values: torch.Tensor, stream: torch.cuda.Stream | None = None
     ) -> CacheEntry:
@@ -173,7 +197,6 @@ class TurboQuantKVCache:
         """Decompress back to float16."""
         with self._lock:
             entry.access_count += 1
-            shape = tuple(entry.metadata["original_shape"])
 
             # 1. Base 3-bit polar dequant
             k = self.polar.dequantize(entry.compressed_keys[0], entry.compressed_keys[1])
@@ -181,6 +204,7 @@ class TurboQuantKVCache:
 
             # 2. Residual correction
             if self.qjl is not None and entry.residual_keys is not None:
+                shape = k.shape
                 k_err = self.qjl.decode(
                     entry.residual_keys, entry.residual_norms_k, original_shape=shape
                 )
@@ -214,6 +238,8 @@ class TurboQuantKVCache:
 
         return {
             "total_mb": total / (1024**2),
+            "total_bytes": total,
+            "bytes": total,  # Legacy support
             "ratio": ratio,
             "savings_percent": (1 - ratio) * 100,
             "packed_mb": packed_bytes / (1024**2),

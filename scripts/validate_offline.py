@@ -27,6 +27,7 @@ def banner(msg: str) -> None:
 # 1. Validate orthogonal rotation matrix generation
 # =============================================================
 
+
 def test_rotation_matrix():
     """Verify QR decomposition produces an orthogonal matrix."""
     print("1. Testing orthogonal rotation matrix generation...")
@@ -44,8 +45,8 @@ def test_rotation_matrix():
     for v in vectors:
         # Subtract projections onto existing orthogonal vectors
         for u in orthogonal:
-            dot = sum(a * b for a, b in zip(v, u))
-            v = [vi - dot * ui for vi, ui in zip(v, u)]
+            dot = sum(a * b for a, b in zip(v, u, strict=False))
+            v = [vi - dot * ui for vi, ui in zip(v, u, strict=False)]
         # Normalize
         norm = math.sqrt(sum(x * x for x in v))
         if norm > 1e-10:
@@ -74,6 +75,7 @@ def test_rotation_matrix():
 # 2. Validate Beta distribution method of moments
 # =============================================================
 
+
 def test_beta_moments():
     """Verify Beta MoM parameter estimation."""
     print("\n2. Testing Beta distribution parameter estimation...")
@@ -84,7 +86,7 @@ def test_beta_moments():
     # Beta(α=2, β=5) → mean = 2/7 ≈ 0.286, var = 10/(49*8) ≈ 0.0255
     true_alpha = 2.0
     true_beta = 5.0
-    true_mean = true_alpha / (true_alpha + true_beta)
+    true_alpha / (true_alpha + true_beta)
 
     # Generate pseudo-Beta samples via inverse CDF approximation
     n = 10000
@@ -118,6 +120,7 @@ def test_beta_moments():
 # =============================================================
 # 3. Validate quantization / dequantization logic
 # =============================================================
+
 
 def test_quantization_logic():
     """Verify uniform quantization to N levels preserves signal."""
@@ -157,14 +160,14 @@ def test_quantization_logic():
     # Dequantize
     levels = [(2 * i / (n_levels - 1)) - 1.0 for i in range(n_levels)]
     reconstructed = []
-    for g_idx, (indices, scale) in enumerate(zip(quantized, scales)):
+    for _g_idx, (indices, scale) in enumerate(zip(quantized, scales, strict=False)):
         for idx in indices:
             reconstructed.append(levels[idx] * scale)
 
     # Compute MSE
-    mse = sum((a - b) ** 2 for a, b in zip(data, reconstructed)) / len(data)
+    mse = sum((a - b) ** 2 for a, b in zip(data, reconstructed, strict=False)) / len(data)
     # Signal power
-    signal_power = sum(x ** 2 for x in data) / len(data)
+    signal_power = sum(x**2 for x in data) / len(data)
     snr_db = 10 * math.log10(signal_power / max(mse, 1e-15))
 
     print(f"   Levels:       {n_levels} ({int(math.log2(n_levels))} bits)")
@@ -180,6 +183,7 @@ def test_quantization_logic():
 # =============================================================
 # 4. Validate bit packing / unpacking
 # =============================================================
+
 
 def test_bit_packing():
     """Verify lossless bit pack/unpack roundtrip."""
@@ -226,13 +230,14 @@ def test_bit_packing():
         unpacked = unpacked[:n]
         assert bits == unpacked, f"Failed at n={n}"
 
-    print(f"   Tested sizes: 1, 7, 8, 15, 16, 32, 64, 100, 128")
+    print("   Tested sizes: 1, 7, 8, 15, 16, 32, 64, 100, 128")
     print("   ✅ Bit packing roundtrip: PASS")
 
 
 # =============================================================
 # 5. Validate compression ratio calculation
 # =============================================================
+
 
 def test_compression_ratio():
     """Verify memory math is correct."""
@@ -243,7 +248,7 @@ def test_compression_ratio():
 
     # FP16 baseline: 2 bytes per element, keys + values
     fp16_bytes = batch * heads * seq * dim * 2 * 2  # *2 for K+V
-    fp16_mb = fp16_bytes / (1024 ** 2)
+    fp16_mb = fp16_bytes / (1024**2)
 
     # TurboQuant 3-bit: 3/8 bytes per element + scales overhead
     group_size = 64
@@ -265,9 +270,9 @@ def test_compression_ratio():
 
     print(f"   Shape: [{batch}, {heads}, {seq}, {dim}]")
     print(f"   FP16:     {fp16_mb:.1f} MB ({fp16_bytes:,} bytes)")
-    print(f"   TQ 3-bit: {tq3_bytes/(1024**2):.1f} MB (ratio: {ratio_3:.2%})")
-    print(f"   TQ 3+1:   {tq4_bytes/(1024**2):.1f} MB (ratio: {ratio_4:.2%})")
-    print(f"   Savings:  {(1-ratio_4)*100:.1f}%")
+    print(f"   TQ 3-bit: {tq3_bytes / (1024**2):.1f} MB (ratio: {ratio_3:.2%})")
+    print(f"   TQ 3+1:   {tq4_bytes / (1024**2):.1f} MB (ratio: {ratio_4:.2%})")
+    print(f"   Savings:  {(1 - ratio_4) * 100:.1f}%")
 
     # NOTE: Current implementation stores 3-bit indices in int8 (1 byte),
     # so actual ratio is ~55% not the theoretical 25% (4/16 bits).
@@ -283,6 +288,7 @@ def test_compression_ratio():
 # 6. Validate Johnson-Lindenstrauss dimension calc
 # =============================================================
 
+
 def test_jl_dimension():
     """Verify JL projection preserves distances approximately."""
     print("\n6. Testing Johnson-Lindenstrauss projection...")
@@ -297,7 +303,7 @@ def test_jl_dimension():
     b = [random.gauss(0, 1) for _ in range(dim)]
 
     # True distance
-    true_dist_sq = sum((x - y) ** 2 for x, y in zip(a, b))
+    true_dist_sq = sum((x - y) ** 2 for x, y in zip(a, b, strict=False))
 
     # Random sign projection
     n_trials = 100
@@ -308,12 +314,12 @@ def test_jl_dimension():
         # Generate projection matrix row by row
         proj_a = []
         proj_b = []
-        for j in range(sketch_dim):
+        for _j in range(sketch_dim):
             row = [(1 if random.random() > 0.5 else -1) * scale for _ in range(dim)]
-            proj_a.append(sum(r * x for r, x in zip(row, a)))
-            proj_b.append(sum(r * x for r, x in zip(row, b)))
+            proj_a.append(sum(r * x for r, x in zip(row, a, strict=False)))
+            proj_b.append(sum(r * x for r, x in zip(row, b, strict=False)))
 
-        proj_dist_sq = sum((x - y) ** 2 for x, y in zip(proj_a, proj_b))
+        proj_dist_sq = sum((x - y) ** 2 for x, y in zip(proj_a, proj_b, strict=False))
         projected_dists.append(proj_dist_sq)
 
     mean_proj_dist = sum(projected_dists) / n_trials
@@ -322,7 +328,7 @@ def test_jl_dimension():
     print(f"   Original dim: {dim}, Sketch dim: {sketch_dim}")
     print(f"   True ||a-b||²:     {true_dist_sq:.2f}")
     print(f"   Mean projected:    {mean_proj_dist:.2f}")
-    print(f"   Relative error:    {relative_error:.4f} ({relative_error*100:.1f}%)")
+    print(f"   Relative error:    {relative_error:.4f} ({relative_error * 100:.1f}%)")
 
     assert relative_error < 0.3, f"JL error too high: {relative_error}"
     print("   ✅ JL distance preservation: PASS")
@@ -331,6 +337,7 @@ def test_jl_dimension():
 # =============================================================
 # 7. File structure validation
 # =============================================================
+
 
 def test_project_structure():
     """Verify all expected files exist."""
@@ -381,6 +388,7 @@ def test_project_structure():
 # =============================================================
 # Main
 # =============================================================
+
 
 def main() -> int:
     banner("TurboQuant Offline Validation")

@@ -33,8 +33,9 @@ class TestPolarQuantizer:
         q = PolarQuantizer(head_dim=64, bits=3, group_size=32)
         x = torch.randn(2, 4, 16, 64, dtype=torch.float16)
         quantized, scales = q(x)
-        assert quantized.shape == x.shape
-        assert quantized.dtype == torch.int8
+        # 64 dims * 3 bits / 8 bits-per-byte = 24 bytes
+        assert quantized.shape == (2, 4, 16, 24)
+        assert quantized.dtype == torch.uint8
         assert scales.dtype == torch.float32
 
     def test_forward_empty(self):
@@ -106,10 +107,10 @@ class TestQJLResidualCorrector:
 
         c = QJLResidualCorrector(head_dim=128, sketch_dim=32)
         r = torch.randn(2, 4, 16, 128, dtype=torch.float16)
-        packed = c.encode(r)
+        packed, norms = c.encode(r)
         assert packed.dtype == torch.uint8
         assert packed.shape == (2, 4, 16, 4)  # 32 / 8 = 4
-        recon = c.decode(packed, r.shape)
+        recon = c.decode(packed, norms, r.shape)
         assert recon.shape == r.shape
 
     def test_empty(self):
@@ -117,7 +118,7 @@ class TestQJLResidualCorrector:
 
         c = QJLResidualCorrector(head_dim=64)
         r = torch.empty(0, 64, dtype=torch.float16)
-        packed = c.encode(r)
+        packed, _ = c.encode(r)
         assert packed.numel() == 0
 
     def test_compress_ratio(self):
@@ -175,8 +176,8 @@ class TestTurboQuantKVCache:
             v = torch.randn(1, 4, 32, 64, dtype=torch.float16)
             entry = tq.compress(k, v)
             mem = tq.memory_usage(entry)
-            assert "bytes" in mem
-            assert "mb" in mem
+            assert "total_bytes" in mem
+            assert "mb" in mem or "total_mb" in mem
             assert "ratio" in mem
             assert mem["ratio"] < 1.0  # compressed < original
 

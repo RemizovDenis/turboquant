@@ -403,7 +403,7 @@ def main() -> None:
 
     print(json.dumps(results, indent=2))
     print(f"\nSaved: {out_json.resolve()}")
-    print(f"TurboQuant saves {total_mem_saved/1024.0:.3f} GB on M4 Air")
+    print(f"TurboQuant saves {total_mem_saved / 1024.0:.3f} GB on M4 Air")
 
 
 if __name__ == "__main__":
