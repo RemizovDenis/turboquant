@@ -16,6 +16,7 @@ import torch
 import torch.nn.functional as F  # noqa: N812
 
 from turboquant.core.qjl import QJLResidualCorrector
+from turboquant.core.adaptive_bitwidth import AdaptiveCompressedCache
 from turboquant.core.turboquant import CacheEntry, TurboQuantConfig, TurboQuantKVCache
 
 log = structlog.get_logger(__name__)
@@ -41,7 +42,7 @@ class LayerKVEntry:
 
     layer_idx: int
     is_anchor: bool
-    entry: CacheEntry | None = None  # full anchor entry if is_anchor or used_delta=False
+    entry: CacheEntry | AdaptiveCompressedCache | None = None  # full anchor entry
     anchor_layer_idx: int | None = None
     delta_keys: torch.Tensor | None = None
     delta_values: torch.Tensor | None = None

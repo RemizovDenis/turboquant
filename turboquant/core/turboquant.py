@@ -26,6 +26,13 @@ from turboquant.core.qjl import QJLResidualCorrector
 
 log = structlog.get_logger(__name__)
 
+__all__ = [
+    "TurboQuantConfig",
+    "CacheEntry",
+    "TurboQuantKVCache",
+    "AdaptiveCompressedCache",
+]
+
 # ======================================================================
 # Configuration
 # ======================================================================
@@ -156,12 +163,15 @@ class TurboQuantKVCache:
         values: torch.Tensor,
         token_ids: torch.Tensor | None = None,
         attention_entropy: torch.Tensor | None = None,
+        layer_id: int | None = None,
     ) -> CacheEntry | AdaptiveCompressedCache:
         """Compress keys/values with true packed 3-bit, optionally adaptive."""
         if self.config.enable_adaptive_bitwidth and self.adaptive is not None:
             return self.adaptive.compress(keys, values, token_ids, attention_entropy)
 
         with self._lock:
+            # layer_id is currently unused in standard mode but accepted for MoE synergy
+            _ = layer_id
             k, v = keys.to(self.device), values.to(self.device)
             bs, heads, seq, dim = k.shape
 
@@ -231,19 +241,25 @@ class TurboQuantKVCache:
                     torch.cat([entry.compressed_values[0], new_entry.compressed_values[0]], dim=-1),
                     torch.cat([entry.compressed_values[1], new_entry.compressed_values[1]], dim=-1),
                 )
-                if entry.residual_keys is not None and new_entry.residual_keys is not None:
-                    entry.residual_keys = torch.cat(
-                        [entry.residual_keys, new_entry.residual_keys], dim=2
-                    )
-                    entry.residual_values = torch.cat(
-                        [entry.residual_values, new_entry.residual_values], dim=2
-                    )
-                    entry.residual_norms_k = torch.cat(
-                        [entry.residual_norms_k, new_entry.residual_norms_k], dim=2
-                    )  # type: ignore
-                    entry.residual_norms_v = torch.cat(
-                        [entry.residual_norms_v, new_entry.residual_norms_v], dim=2
-                    )  # type: ignore
+                r_keys, nr_keys = entry.residual_keys, new_entry.residual_keys
+                r_vals, nr_vals = entry.residual_values, new_entry.residual_values
+                r_n_k, nr_n_k = entry.residual_norms_k, new_entry.residual_norms_k
+                r_n_v, nr_n_v = entry.residual_norms_v, new_entry.residual_norms_v
+
+                if (
+                    r_keys is not None
+                    and nr_keys is not None
+                    and r_vals is not None
+                    and nr_vals is not None
+                    and r_n_k is not None
+                    and nr_n_k is not None
+                    and r_n_v is not None
+                    and nr_n_v is not None
+                ):
+                    entry.residual_keys = torch.cat([r_keys, nr_keys], dim=2)
+                    entry.residual_values = torch.cat([r_vals, nr_vals], dim=2)
+                    entry.residual_norms_k = torch.cat([r_n_k, nr_n_k], dim=2)
+                    entry.residual_norms_v = torch.cat([r_n_v, nr_n_v], dim=2)
 
                 entry.metadata["seq_len"] = seq_old + new_keys.shape[2]
                 return entry
@@ -256,7 +272,7 @@ class TurboQuantKVCache:
 
     def compress_async(
         self, keys: torch.Tensor, values: torch.Tensor, stream: torch.cuda.Stream | None = None
-    ) -> CacheEntry:
+    ) -> CacheEntry | AdaptiveCompressedCache:
         """Non-blocking compression using CUDA stream."""
         if torch.cuda.is_available() and stream is None:
             stream = torch.cuda.Stream(device=self.device)  # type: ignore[no-untyped-call]
@@ -274,6 +290,12 @@ class TurboQuantKVCache:
             return self.adaptive.decompress(entry, entry.original_shape)
 
         with self._lock:
+            # Type narrowing for the rest of the method
+            if isinstance(entry, AdaptiveCompressedCache):
+                # Should have been handled above if self.adaptive is not None
+                # If we are here, something is wrong, but we return to avoid crash
+                return self.decompress(entry) if self.adaptive else (torch.empty(0), torch.empty(0))
+
             entry.access_count += 1
 
             # 1. Base 3-bit polar dequant

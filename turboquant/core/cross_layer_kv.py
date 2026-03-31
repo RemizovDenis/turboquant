@@ -11,6 +11,7 @@ import torch
 import torch.nn.functional as functional
 
 from turboquant.core.polar_quant import PolarQuantConfig, PolarQuantizer
+from turboquant.core.adaptive_bitwidth import AdaptiveCompressedCache
 from turboquant.core.turboquant import CacheEntry, TurboQuantKVCache
 
 LOGGER = structlog.get_logger(__name__)
@@ -49,7 +50,7 @@ class CrossLayerCacheEntry:
     anchor_layer_id: int
     layer_id: int
     is_anchor: bool
-    anchor_entry: CacheEntry | None
+    anchor_entry: CacheEntry | AdaptiveCompressedCache | None
     delta_packed: torch.Tensor | None
     delta_scales: torch.Tensor | None
     delta_norm_ratio: float
@@ -86,7 +87,7 @@ class CrossLayerKVCache:
         )
         self.delta_quantizer = PolarQuantizer(delta_cfg).to(base_quantizer.device)
         self.entries: dict[int, CrossLayerCacheEntry] = {}
-        self.anchor_entries: dict[int, CacheEntry] = {}
+        self.anchor_entries: dict[int, CacheEntry | AdaptiveCompressedCache] = {}
         self._lock = threading.RLock()
         self._step_count = 0
         self._logger = LOGGER.bind(component="CrossLayerKVCache")

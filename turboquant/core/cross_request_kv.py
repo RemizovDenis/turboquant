@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 import structlog
 import torch
 
+from turboquant.core.adaptive_bitwidth import AdaptiveCompressedCache
 from turboquant.core.turboquant import CacheEntry, TurboQuantConfig, TurboQuantKVCache
 
 log = structlog.get_logger(__name__)
@@ -23,7 +24,7 @@ log = structlog.get_logger(__name__)
 class SharedKVBlock:
     """Immutable compressed KV block shared across requests."""
 
-    entry: CacheEntry
+    entry: CacheEntry | AdaptiveCompressedCache
     prefix_hash: str
     token_count: int
     ref_count: int = 1
@@ -100,7 +101,7 @@ class CrossRequestKVCache:
             )
             return block_id
 
-    def get_prefix_entry(self, block_id: str) -> CacheEntry | None:
+    def get_prefix_entry(self, block_id: str) -> CacheEntry | AdaptiveCompressedCache | None:
         """Retrieve shared compressed prefix block."""
         with self._lock:
             if block_id in self._shared_blocks:
@@ -122,7 +123,7 @@ class CrossRequestKVCache:
         block_id: str,
         new_keys: torch.Tensor,
         new_values: torch.Tensor,
-    ) -> CacheEntry:
+    ) -> CacheEntry | AdaptiveCompressedCache:
         """Create private extension of shared prefix (private part only)."""
         # The shared prefix is NOT copied. New tokens are compressed separately.
         return self.tq.compress(new_keys, new_values)
@@ -130,7 +131,7 @@ class CrossRequestKVCache:
     def decompress_full(
         self,
         block_id: str,
-        private_entry: CacheEntry | None = None,
+        private_entry: CacheEntry | AdaptiveCompressedCache | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Decompress shared prefix + optional private part into full KV."""
         prefix_entry = self.get_prefix_entry(block_id)
