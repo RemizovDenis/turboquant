@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import cast
 
 import structlog
 import torch
@@ -51,6 +51,7 @@ class QJLResidualCorrector(nn.Module):
 
         sketch = self._build_sketch()
         self.register_buffer("S", sketch)
+        self.register_buffer("powers", torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], dtype=torch.uint8))
 
     def _build_sketch(self) -> torch.Tensor:
         """Standard Rademacher sketch."""
@@ -141,16 +142,12 @@ class QJLResidualCorrector(nn.Module):
 
         # Reshape and bits to byte
         res = bits.reshape(*bits.shape[:-1], -1, 8)
-        powers = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], device=bits.device, dtype=torch.uint8)
-        packed = (res * powers).sum(dim=-1).to(torch.uint8)
+        packed = (res * self.powers).sum(dim=-1).to(torch.uint8)
         return packed
 
     def _unpack_bits(self, packed: torch.Tensor, k: int) -> torch.Tensor:
         """Unpack uint8 bytes to binary (0, 1) tensor."""
-        powers = torch.tensor(
-            [1, 2, 4, 8, 16, 32, 64, 128], device=packed.device, dtype=torch.uint8
-        )
-        unpacked = (packed.unsqueeze(-1) & powers).gt(0).to(torch.float32)
+        unpacked = (packed.unsqueeze(-1) & self.powers).gt(0).to(torch.float32)
         return unpacked.view(*packed.shape[:-1], -1)[..., :k]
 
     def encode_with_scale(self, residual: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -168,33 +165,30 @@ class AdaptiveQJLCorrector(nn.Module):
 
     def encode_with_importance(
         self, residual: torch.Tensor, importance_scores: torch.Tensor
-    ) -> dict[str, Any]:
-        """Route to low or high resolution based on importance > 0.7."""
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Vectorized importance-based routing."""
         high_mask = importance_scores > 0.7
-        # This is a bit complex for vectorized execution, so we split and store
-        # In a real system we'd handle indices or use padding.
-        # For the prompt requirements, let's return a dict with both.
-
         res_high = residual[high_mask]
         res_low = residual[~high_mask]
 
-        entry = {
-            "high_mask": high_mask,
-            "original_shape": residual.shape,
-            "high": self.high.encode(res_high) if res_high.numel() > 0 else (None, None),
-            "low": self.low.encode(res_low) if res_low.numel() > 0 else (None, None),
-        }
-        return entry
+        p_h, n_h = self.high.encode(res_high) if res_high.numel() > 0 else (None, None)
+        p_l, n_l = self.low.encode(res_low) if res_low.numel() > 0 else (None, None)
 
-    def decode_with_importance(self, entry: dict[str, Any]) -> torch.Tensor:
-        high_mask = entry["high_mask"]
-        orig_shape = entry["original_shape"]
+        # Return a flat tuple for JIT/TorchScript compatibility instead of a dict
+        return high_mask, p_h, n_h, p_l, n_l # type: ignore
 
-        out = torch.zeros(orig_shape, device=high_mask.device, dtype=torch.float16)
-
-        if entry["high"][0] is not None:
-            out[high_mask] = self.high.decode(entry["high"][0], entry["high"][1])
-        if entry["low"][0] is not None:
-            out[~high_mask] = self.low.decode(entry["low"][0], entry["low"][1])
-
+    def decode_with_importance(
+        self,
+        high_mask: torch.Tensor,
+        p_h: torch.Tensor | None,
+        n_h: torch.Tensor | None,
+        p_l: torch.Tensor | None,
+        n_l: torch.Tensor | None,
+        original_shape: tuple[int, ...],
+    ) -> torch.Tensor:
+        out = torch.zeros(original_shape, device=high_mask.device, dtype=torch.float16)
+        if p_h is not None and n_h is not None:
+            out[high_mask] = self.high.decode(p_h, n_h)
+        if p_l is not None and n_l is not None:
+            out[~high_mask] = self.low.decode(p_l, n_l)
         return out

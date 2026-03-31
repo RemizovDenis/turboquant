@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import torch
 
-from turboquant.core.adaptive_bitwidth import AdaptiveBitwidthQuantizer, AdaptiveBitwithConfig
+from turboquant.core.adaptive_bitwidth import AdaptiveBitwidthQuantizer, AdaptiveBitwidthConfig
 
 
 def test_assign_bitwidths_and_compress_roundtrip() -> None:
-    cfg = AdaptiveBitwithConfig(
+    cfg = AdaptiveBitwidthConfig(
         head_dim=8,
         num_heads=2,
         vocab_size=128,
@@ -30,6 +30,6 @@ def test_assign_bitwidths_and_compress_roundtrip() -> None:
     assert rk.shape == keys.shape
     assert rv.shape == values.shape
 
-    stats = quant.memory_savings_vs_uniform(compressed, seq_len=16)
+    stats = quant.memory_savings_vs_uniform(compressed)
     assert "avg_bits" in stats
     assert "additional_savings_percent" in stats

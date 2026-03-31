@@ -18,11 +18,10 @@ import torch
 import torch.nn.functional as F  # noqa: N812
 
 from turboquant.core.adaptive_bitwidth import (
-    AdaptiveBitwithConfig,
     AdaptiveBitwidthQuantizer,
     AdaptiveCompressedCache,
 )
-from turboquant.core.polar_quant import PolarQuantConfig, PolarQuantizer
+from turboquant.core.polar_quant import PolarQuantizer
 from turboquant.core.qjl import QJLResidualCorrector
 
 log = structlog.get_logger(__name__)
@@ -103,6 +102,7 @@ class TurboQuantKVCache:
     def __init__(self, config: TurboQuantConfig) -> None:
         self.config = config
         self._lock = threading.RLock()
+        self._latest_report: dict[str, float] = {}
 
         # Determine device
         if "cuda" in config.device and not torch.cuda.is_available():
@@ -145,7 +145,7 @@ class TurboQuantKVCache:
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        pass
+        """Context manager exit."""
 
     @property
     def quantizer(self) -> PolarQuantizer:
@@ -195,15 +195,51 @@ class TurboQuantKVCache:
                     "device": str(self.device),
                 },
             )
+            self._latest_report = self.memory_usage(entry)
             return entry
 
     def update(
-        self, entry: CacheEntry, new_keys: torch.Tensor, new_values: torch.Tensor
-    ) -> CacheEntry:
+        self, entry: CacheEntry | AdaptiveCompressedCache, new_keys: torch.Tensor, new_values: torch.Tensor
+    ) -> CacheEntry | AdaptiveCompressedCache:
         """Update existing CacheEntry by appending new keys/values."""
         with self._lock:
-            # For simplicity in v0.3.0, we decompress and re-compress
-            # In a production setting, this would be optimized kernel-side
+            if isinstance(entry, AdaptiveCompressedCache):
+                # For adaptive, we must re-evaluate assignments for the whole sequence
+                # to maintain the global bit budget.
+                k_old, v_old = self.decompress(entry)
+                k_new = torch.cat([k_old, new_keys.to(self.device)], dim=2)
+                v_new = torch.cat([v_old, new_values.to(self.device)], dim=2)
+                return self.compress(k_new, v_new)
+
+            # For standard PolarQuant, we can compress the NEW part and concatenate
+            # assuming the previous sequence length was a multiple of group_size
+            # to avoid grain misalignment.
+            seq_old = entry.metadata.get("seq_len", 0)
+            if seq_old % self.config.group_size == 0:
+                new_entry = self.compress(new_keys, new_values)
+                if isinstance(new_entry, AdaptiveCompressedCache):
+                    # Should not happen given the check above, but for type safety:
+                    return new_entry
+
+                # Merge packed tensors
+                entry.compressed_keys = (
+                    torch.cat([entry.compressed_keys[0], new_entry.compressed_keys[0]], dim=-1),
+                    torch.cat([entry.compressed_keys[1], new_entry.compressed_keys[1]], dim=-1),
+                )
+                entry.compressed_values = (
+                    torch.cat([entry.compressed_values[0], new_entry.compressed_values[0]], dim=-1),
+                    torch.cat([entry.compressed_values[1], new_entry.compressed_values[1]], dim=-1),
+                )
+                if entry.residual_keys is not None and new_entry.residual_keys is not None:
+                    entry.residual_keys = torch.cat([entry.residual_keys, new_entry.residual_keys], dim=2)
+                    entry.residual_values = torch.cat([entry.residual_values, new_entry.residual_values], dim=2)
+                    entry.residual_norms_k = torch.cat([entry.residual_norms_k, new_entry.residual_norms_k], dim=2) # type: ignore
+                    entry.residual_norms_v = torch.cat([entry.residual_norms_v, new_entry.residual_norms_v], dim=2) # type: ignore
+
+                entry.metadata["seq_len"] = seq_old + new_keys.shape[2]
+                return entry
+
+            # Fallback for misaligned sequence lengths
             k_old, v_old = self.decompress(entry)
             k_new = torch.cat([k_old, new_keys.to(self.device)], dim=2)
             v_new = torch.cat([v_old, new_values.to(self.device)], dim=2)
@@ -303,12 +339,7 @@ class TurboQuantKVCache:
 
     def latest_memory_usage(self) -> dict[str, float]:
         """Return memory metrics for the most recently registered cache entry."""
-        # Simple implementation: latest state tracking should be done per-session
-        # For now, returning safe defaults that don't mislead the user.
-        return {
-            "total_mb": 0.0,
-            "status": 1.0,  # Active
-        }
+        return self._latest_report or {"total_mb": 0.0, "status": 0.0}
 
     def quality_metrics(
         self, original_keys: torch.Tensor, original_values: torch.Tensor

@@ -27,7 +27,7 @@ def _maybe_compile(fn: Any) -> Any:
 
 
 @dataclass
-class AdaptiveBitwithConfig:
+class AdaptiveBitwidthConfig:
     """Configuration for adaptive bitwidth quantization."""
 
     head_dim: int
@@ -46,11 +46,12 @@ class AdaptiveBitwithConfig:
     dtype: torch.dtype = torch.float16
 
 
-AdaptiveBitwidthConfig = AdaptiveBitwithConfig
+# Backward compatibility alias (deprecated)
+AdaptiveBitwithConfig = AdaptiveBitwidthConfig
 
 
 @dataclass
-class BitwithAssignment:
+class BitwidthAssignment:
     """Per-token bit allocation plan."""
 
     token_indices: torch.Tensor
@@ -69,7 +70,7 @@ class AdaptiveCompressedCache:
 
     components: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]]
     original_shape: tuple[int, ...]
-    assignment: BitwithAssignment
+    assignment: BitwidthAssignment
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -124,7 +125,7 @@ class TokenImportanceClassifier(nn.Module):
 class AdaptiveBitwidthQuantizer:
     """Assign and apply dynamic bitwidths per token."""
 
-    def __init__(self, config: AdaptiveBitwithConfig) -> None:
+    def __init__(self, config: AdaptiveBitwidthConfig) -> None:
         """Initialize adaptive quantizer and per-bit quantizer bank."""
         self.config = config
         self.device = torch.device(config.device)
@@ -171,7 +172,7 @@ class AdaptiveBitwidthQuantizer:
         token_ids: torch.Tensor | None,
         attention_entropy: torch.Tensor | None,
         seq_len: int,
-    ) -> BitwithAssignment:
+    ) -> BitwidthAssignment:
         """Assign bitwidth to each token using classifier and/or entropy."""
         seq_len = max(0, int(seq_len))
         indices = torch.arange(seq_len, device=self.device, dtype=torch.long)
@@ -219,7 +220,7 @@ class AdaptiveBitwidthQuantizer:
         c3 = int((bits_i == 3).sum().item())
         c4 = int((bits_i == 4).sum().item())
 
-        return BitwithAssignment(
+        return BitwidthAssignment(
             token_indices=indices,
             bits_per_token=bits_u8,
             avg_bits=avg,
@@ -276,6 +277,21 @@ class AdaptiveBitwidthQuantizer:
             assignment=assignment,
             metadata={"seq_len": seq_len},
         )
+
+    def warmup(
+        self,
+        token_ids: torch.Tensor,
+        attention_weights: torch.Tensor,
+    ) -> None:
+        """Warmup the importance classifier using initial batches.
+
+        Args:
+            token_ids: Initial token IDs.
+            attention_weights: Initial attention weights/maps.
+        """
+        with self._lock:
+            self.classifier.calibrate(token_ids, attention_weights)
+            self._logger.info("adaptive_warmup_complete", tokens=token_ids.numel())
 
     def decompress(
         self,
@@ -343,10 +359,8 @@ class AdaptiveBitwidthQuantizer:
     def memory_savings_vs_uniform(
         self,
         compressed: AdaptiveCompressedCache,
-        seq_len: int,
     ) -> dict[str, float]:
         """Compare adaptive storage against uniform 3-bit baseline."""
-        del seq_len
         avg_bits = self.actual_avg_bits(compressed)
         additional = (3.0 - avg_bits) / 3.0 * 100.0
         assignment = compressed.assignment
