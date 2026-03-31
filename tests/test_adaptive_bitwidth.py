@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from turboquant.core.adaptive_bitwidth import AdaptiveBitwidthQuantizer, AdaptiveBitwidthConfig
+from turboquant.core.adaptive_bitwidth import AdaptiveBitwidthConfig, AdaptiveBitwidthQuantizer
 
 
 def test_assign_bitwidths_and_compress_roundtrip() -> None:

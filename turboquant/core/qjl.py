@@ -51,7 +51,9 @@ class QJLResidualCorrector(nn.Module):
 
         sketch = self._build_sketch()
         self.register_buffer("S", sketch)
-        self.register_buffer("powers", torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], dtype=torch.uint8))
+        self.register_buffer(
+            "powers", torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], dtype=torch.uint8)
+        )
 
     def _build_sketch(self) -> torch.Tensor:
         """Standard Rademacher sketch."""
@@ -175,7 +177,7 @@ class AdaptiveQJLCorrector(nn.Module):
         p_l, n_l = self.low.encode(res_low) if res_low.numel() > 0 else (None, None)
 
         # Return a flat tuple for JIT/TorchScript compatibility instead of a dict
-        return high_mask, p_h, n_h, p_l, n_l # type: ignore
+        return high_mask, p_h, n_h, p_l, n_l  # type: ignore
 
     def decode_with_importance(
         self,
