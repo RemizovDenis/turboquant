@@ -296,7 +296,7 @@ class CrossLayerKVDeltaCache:
                     delta_bytes += entry.delta_key_norms.numel() * entry.delta_key_norms.element_size()
                 if entry.delta_value_norms is not None:
                     delta_bytes += entry.delta_value_norms.numel() * entry.delta_value_norms.element_size()
-                
+
                 total_mb += delta_bytes / (1024**2)
             else:
                 num_fallback += 1

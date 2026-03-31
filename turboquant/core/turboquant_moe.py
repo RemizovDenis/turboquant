@@ -24,7 +24,7 @@ from turboquant.core.moe_expert_cache import DynamicExpertCache, ExpertCacheConf
 from turboquant.core.moe_router import MoERouterOptimizer, RouterOptimizerConfig, RouterOutput
 from turboquant.core.nash_router import GameTheoreticRouter, NashRouterConfig
 from turboquant.core.pid_vram import PIDConfig, VRAM_PID_Controller
-from turboquant.core.polar_quant import PolarQuantConfig, PolarQuantizer
+from turboquant.core.polar_quant import PolarQuantizer
 from turboquant.core.semantic_eviction import SemanticEvictionConfig
 from turboquant.core.turboquant import CacheEntry, TurboQuantConfig, TurboQuantKVCache
 
