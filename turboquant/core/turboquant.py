@@ -202,7 +202,7 @@ class TurboQuantKVCache:
     ) -> CacheEntry:
         """Non-blocking compression using CUDA stream."""
         if torch.cuda.is_available() and stream is None:
-            stream = torch.cuda.Stream(device=self.device)
+            stream = torch.cuda.Stream(device=self.device)  # type: ignore[no-untyped-call]
 
         with torch.cuda.stream(stream) if stream else contextlib.nullcontext():
             return self.compress(keys, values)
@@ -217,7 +217,11 @@ class TurboQuantKVCache:
             v = self.polar.dequantize(entry.compressed_values[0], entry.compressed_values[1])
 
             # 2. Residual correction
-            if self.qjl is not None and entry.residual_keys is not None:
+            if (
+                self.qjl is not None
+                and entry.residual_keys is not None
+                and entry.residual_values is not None
+            ):
                 shape = k.shape
                 k_err = self.qjl.decode(
                     entry.residual_keys, entry.residual_norms_k, original_shape=shape

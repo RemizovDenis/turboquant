@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import cast
 
 import numpy as np
 import structlog
@@ -185,7 +186,7 @@ class PolarQuantizer(nn.Module):
         q, r = torch.linalg.qr(z)
         d = r.diagonal().sign()
         d[d == 0] = 1.0
-        return q * d.unsqueeze(0)
+        return cast(torch.Tensor, q * d.unsqueeze(0))
 
     def _apply_rotation(self, x: torch.Tensor, inverse: bool = False) -> torch.Tensor:
         if self.use_hadamard and (self.head_dim & (self.head_dim - 1) == 0):

@@ -490,8 +490,8 @@ class TurboQuantMoE:
         kv_mem = self.kv_cache.latest_memory_usage()
 
         ex_stats = self.expert_cache.stats()
-        expert_baseline = ex_stats.gpu_memory_used_mb + ex_stats.gpu_memory_saved_mb
-        expert_used = ex_stats.gpu_memory_used_mb + ex_stats.cpu_memory_used_mb
+        expert_baseline = ex_stats.gpu_memory_mb + ex_stats.gpu_memory_saved_mb
+        expert_used = ex_stats.gpu_memory_mb + ex_stats.cpu_memory_mb
         expert_ratio = expert_used / max(1e-8, expert_baseline)
 
         total_saved = (
@@ -503,8 +503,8 @@ class TurboQuantMoE:
             kv_cache_mb=kv_mem["total_mb"],
             kv_cache_fp16_baseline_mb=kv_mem["fp16_baseline_mb"],
             kv_compression_ratio=kv_mem["compression_ratio"],
-            expert_gpu_mb=ex_stats.gpu_memory_used_mb,
-            expert_cpu_mb=ex_stats.cpu_memory_used_mb,
+            expert_gpu_mb=ex_stats.gpu_memory_mb,
+            expert_cpu_mb=ex_stats.cpu_memory_mb,
             expert_total_baseline_mb=expert_baseline,
             expert_compression_ratio=expert_ratio,
             total_saved_mb=total_saved,

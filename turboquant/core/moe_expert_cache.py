@@ -42,6 +42,8 @@ class CacheStats:
     misses: int = 0
     prefetches: int = 0
     load_latency_ms: float = 0.0
+    gpu_memory_mb: float = 0.0
+    cpu_memory_mb: float = 0.0
     gpu_memory_saved_mb: float = 0.0
     avg_prefetch_accuracy: float = 0.0
     avg_load_time_ms: float = 0.0
@@ -66,7 +68,9 @@ class AsyncExpertLoader:
     def __init__(self, device: torch.device, stream: torch.cuda.Stream | None = None):
         self.device = device
         self.stream = stream or (
-            torch.cuda.Stream(device=device) if device.type == "cuda" else None
+            torch.cuda.Stream(device=self.device)  # type: ignore[no-untyped-call]
+            if device.type == "cuda"
+            else None
         )
         self._pending: dict[tuple[int, int], Any] = {}  # (layer_id, expert_id)
         self._load_count = 0

@@ -20,10 +20,10 @@ from turboquant.core.turboquant import TurboQuantConfig, TurboQuantKVCache
 class CompressedVectors:
     """Compressed embedding block container."""
 
-    packed: np.ndarray
-    scales: np.ndarray
+    packed: np.ndarray[Any, np.dtype[Any]]
+    scales: np.ndarray[Any, np.dtype[Any]]
     original_shape: tuple[int, int]
-    original_dtype: np.dtype
+    original_dtype: np.dtype[Any]
     metadata: dict[str, Any]
 
 
@@ -40,19 +40,23 @@ class TurboQuantVectorAdapter(abc.ABC):
     """Abstract base adapter for compressed vector backends."""
 
     @abc.abstractmethod
-    def compress_embeddings(self, vectors: np.ndarray) -> CompressedVectors:
+    def compress_embeddings(self, vectors: np.ndarray[Any, np.dtype[Any]]) -> CompressedVectors:
         raise RuntimeError("Abstract method")
 
     @abc.abstractmethod
-    def decompress_embeddings(self, compressed: CompressedVectors) -> np.ndarray:
+    def decompress_embeddings(
+        self, compressed: CompressedVectors
+    ) -> np.ndarray[Any, np.dtype[Any]]:
         raise RuntimeError("Abstract method")
 
     @abc.abstractmethod
-    def search(self, query: np.ndarray, top_k: int) -> list[SearchResult]:
+    def search(self, query: np.ndarray[Any, np.dtype[Any]], top_k: int) -> list[SearchResult]:
         raise RuntimeError("Abstract method")
 
     @abc.abstractmethod
-    def search_async(self, query: np.ndarray, top_k: int) -> Awaitable[list[SearchResult]]:
+    def search_async(
+        self, query: np.ndarray[Any, np.dtype[Any]], top_k: int
+    ) -> Awaitable[list[SearchResult]]:
         raise RuntimeError("Abstract method")
 
     @abc.abstractmethod
@@ -78,7 +82,7 @@ class InMemoryTurboQuant(TurboQuantVectorAdapter):
     def add(
         self,
         ids: list[str],
-        embeddings: np.ndarray,
+        embeddings: np.ndarray[Any, np.dtype[Any]],
         metadatas: list[dict[str, Any]] | None = None,
     ) -> None:
         if embeddings.ndim != 2:
@@ -90,7 +94,7 @@ class InMemoryTurboQuant(TurboQuantVectorAdapter):
         self._raw_nbytes = int(embeddings.nbytes)
         self._compressed = self.compress_embeddings(embeddings)
 
-    def compress_embeddings(self, vectors: np.ndarray) -> CompressedVectors:
+    def compress_embeddings(self, vectors: np.ndarray[Any, np.dtype[Any]]) -> CompressedVectors:
         if vectors.ndim != 2:
             raise ValueError("vectors must be 2D")
         n, d = vectors.shape
@@ -115,7 +119,9 @@ class InMemoryTurboQuant(TurboQuantVectorAdapter):
         self._compressed = compressed
         return compressed
 
-    def decompress_embeddings(self, compressed: CompressedVectors) -> np.ndarray:
+    def decompress_embeddings(
+        self, compressed: CompressedVectors
+    ) -> np.ndarray[Any, np.dtype[Any]]:
         n, d = compressed.original_shape
         packed = torch.from_numpy(compressed.packed)
         scales = torch.from_numpy(compressed.scales)
@@ -126,7 +132,7 @@ class InMemoryTurboQuant(TurboQuantVectorAdapter):
         # Handle original shape correctly during decompression
         return restored.squeeze(1).squeeze(1).cpu().numpy().astype(np.float32)
 
-    def search(self, query: np.ndarray, top_k: int) -> list[SearchResult]:
+    def search(self, query: np.ndarray[Any, np.dtype[Any]], top_k: int) -> list[SearchResult]:
         if self._compressed is None:
             return []
         vectors = self.decompress_embeddings(self._compressed)
@@ -143,7 +149,9 @@ class InMemoryTurboQuant(TurboQuantVectorAdapter):
             )
         return out
 
-    def search_async(self, query: np.ndarray, top_k: int) -> Awaitable[list[SearchResult]]:
+    def search_async(
+        self, query: np.ndarray[Any, np.dtype[Any]], top_k: int
+    ) -> Awaitable[list[SearchResult]]:
         loop = asyncio.get_running_loop()
         return loop.run_in_executor(None, lambda: self.search(query, top_k))
 
@@ -180,7 +188,7 @@ class ChromaDBTurboQuant(InMemoryTurboQuant):
     def add(
         self,
         ids: list[str],
-        embeddings: np.ndarray,
+        embeddings: np.ndarray[Any, np.dtype[Any]],
         metadatas: list[dict[str, Any]] | None = None,
     ) -> None:
         super().add(ids, embeddings, metadatas)
@@ -213,7 +221,7 @@ class QdrantTurboQuant(InMemoryTurboQuant):
     def upsert(
         self,
         ids: list[str],
-        embeddings: np.ndarray,
+        embeddings: np.ndarray[Any, np.dtype[Any]],
         payloads: list[dict[str, Any]] | None = None,
     ) -> None:
         super().add(ids, embeddings, payloads)

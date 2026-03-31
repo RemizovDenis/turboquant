@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import threading
-from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -11,7 +10,7 @@ import structlog
 import torch
 import torch.nn as nn
 
-from turboquant.core.polar_quant import PolarQuantConfig, PolarQuantizer
+from turboquant.core.polar_quant import PolarQuantizer
 
 LOGGER = structlog.get_logger(__name__)
 
@@ -78,8 +77,14 @@ class TokenImportanceClassifier(nn.Module):
     """Embedding-lookup token importance estimator."""
 
     def __init__(self, vocab_size: int, embedding_dim: int = 16) -> None:
-        """Initialize classifier."""
+        """Initialize classifier.
+
+        Args:
+            vocab_size: Token vocabulary size.
+            embedding_dim: Unused compatibility argument for API stability.
+        """
         super().__init__()
+        del embedding_dim
         self.importance_embedding = nn.Embedding(vocab_size, 1)
         with torch.no_grad():
             self.importance_embedding.weight.fill_(3.0)
@@ -120,7 +125,7 @@ class AdaptiveBitwidthQuantizer:
     """Assign and apply dynamic bitwidths per token."""
 
     def __init__(self, config: AdaptiveBitwithConfig) -> None:
-        """Initialize adaptive quantizer."""
+        """Initialize adaptive quantizer and per-bit quantizer bank."""
         self.config = config
         self.device = torch.device(config.device)
         self.classifier = TokenImportanceClassifier(
@@ -129,17 +134,12 @@ class AdaptiveBitwidthQuantizer:
         ).to(self.device)
         self.quantizers: dict[int, PolarQuantizer] = {
             bits: PolarQuantizer(
-                PolarQuantConfig(
-                    head_dim=config.head_dim,
-                    bits=bits,
-                    group_size=64,
-                    seed=42 + bits,
-                    use_hadamard=True,
-                )
+                head_dim=config.head_dim,
+                bits=bits,
+                device=str(config.device),
             ).to(self.device)
             for bits in range(config.min_bits, config.max_bits + 1)
         }
-        self.attention_entropy_buffer: deque[torch.Tensor] = deque(maxlen=1000)
         self._compress_count = 0
         self._lock = threading.RLock()
         self._logger = LOGGER.bind(component="AdaptiveBitwidthQuantizer")
@@ -176,7 +176,7 @@ class AdaptiveBitwidthQuantizer:
         attention_entropy: torch.Tensor | None,
         seq_len: int,
     ) -> BitwithAssignment:
-        """Assign bitwidth to each token."""
+        """Assign bitwidth to each token using classifier and/or entropy."""
         seq_len = max(0, int(seq_len))
         indices = torch.arange(seq_len, device=self.device, dtype=torch.long)
 
@@ -262,6 +262,18 @@ class AdaptiveBitwidthQuantizer:
             components.append((packed, scales, mask.to(torch.uint8), bitwidth))
 
         self._compress_count += 1
+        if self._compress_count % 100 == 0:
+            self._logger.info(
+                "adaptive_bitwidth_stats",
+                avg_bits=assignment.avg_bits,
+                bits_distribution={
+                    "1": assignment.tokens_at_1bit,
+                    "2": assignment.tokens_at_2bit,
+                    "3": assignment.tokens_at_3bit,
+                    "4": assignment.tokens_at_4bit,
+                },
+            )
+
         return AdaptiveCompressedCache(
             components=components,
             original_shape=tuple(int(x) for x in keys.shape),
@@ -274,16 +286,16 @@ class AdaptiveBitwidthQuantizer:
         compressed: AdaptiveCompressedCache,
         original_shape: tuple[int, ...],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Decompress adaptive representation."""
+        """Decompress adaptive representation back to KV tensors."""
         batch, heads, seq_len, head_dim = (int(x) for x in original_shape)
         keys = torch.zeros(original_shape, dtype=torch.float16, device=self.device)
         values = torch.zeros_like(keys)
 
         for packed, scales, mask_u8, bitwidth in compressed.components:
             mask = mask_u8.to(torch.bool)
-            if not bool(mask.any()):
+            token_count = int(mask.sum().item())
+            if token_count == 0:
                 continue
-            # Fix: dequantize takes 2 arguments in v0.3.0
             sub_k = self.quantizers[bitwidth].dequantize(packed[0], scales[0])
             sub_v = self.quantizers[bitwidth].dequantize(packed[1], scales[1])
             keys[:, :, mask, :] = sub_k
@@ -291,8 +303,35 @@ class AdaptiveBitwidthQuantizer:
 
         return (keys, values)
 
+    def calibrate_on_dataset(
+        self,
+        token_ids_list: list[torch.Tensor],
+        attention_weights_list: list[torch.Tensor],
+    ) -> None:
+        """Calibrate classifier online on a dataset of tokens and attention maps."""
+        n = min(len(token_ids_list), len(attention_weights_list))
+        if n == 0:
+            return
+
+        pre = []
+        post = []
+        for idx in range(n):
+            tokens = token_ids_list[idx].to(self.device)
+            attn = attention_weights_list[idx].to(self.device)
+            before = self.assign_bitwidths(tokens, None, seq_len=int(tokens.numel())).avg_bits
+            self.classifier.calibrate(tokens, attn)
+            after = self.assign_bitwidths(tokens, None, seq_len=int(tokens.numel())).avg_bits
+            pre.append(before)
+            post.append(after)
+
+        self._logger.info(
+            "adaptive_calibration",
+            avg_bits_before=float(sum(pre) / max(1, len(pre))),
+            avg_bits_after=float(sum(post) / max(1, len(post))),
+        )
+
     def actual_avg_bits(self, compressed: AdaptiveCompressedCache) -> float:
-        """Compute effective average bits."""
+        """Compute effective average bits including scale overhead."""
         shape = compressed.original_shape
         batch, heads, seq_len, head_dim = (int(x) for x in shape)
         total_scalars = batch * heads * seq_len * head_dim * 2
