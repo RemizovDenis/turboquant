@@ -42,11 +42,13 @@ def _pack_1bit(indices: torch.Tensor) -> torch.Tensor:
     )
     return packed
 
+
 def _unpack_1bit(packed: torch.Tensor, original_dim: int) -> torch.Tensor:
     """Unpack 1-bit values from uint8."""
     v = packed.unsqueeze(-1)
     unpacked = torch.stack([(v >> i) & 1 for i in range(8)], dim=-1)
     return unpacked.view(*packed.shape[:-1], -1).narrow(-1, 0, original_dim).to(torch.int8)
+
 
 def _pack_2bit(indices: torch.Tensor) -> torch.Tensor:
     """Pack 4 2-bit values into 1 byte."""
@@ -55,14 +57,21 @@ def _pack_2bit(indices: torch.Tensor) -> torch.Tensor:
         pad = 4 - (n % 4)
         indices = torch.nn.functional.pad(indices, (0, pad), value=0)
     v = indices.to(torch.uint8).view(*indices.shape[:-1], -1, 4)
-    packed = (v[..., 0] & 0x03) | ((v[..., 1] & 0x03) << 2) | ((v[..., 2] & 0x03) << 4) | ((v[..., 3] & 0x03) << 6)
+    packed = (
+        (v[..., 0] & 0x03)
+        | ((v[..., 1] & 0x03) << 2)
+        | ((v[..., 2] & 0x03) << 4)
+        | ((v[..., 3] & 0x03) << 6)
+    )
     return packed
+
 
 def _unpack_2bit(packed: torch.Tensor, original_dim: int) -> torch.Tensor:
     """Unpack 2-bit values from uint8."""
     v = packed.unsqueeze(-1)
     unpacked = torch.stack([(v >> (2 * i)) & 0x03 for i in range(4)], dim=-1)
     return unpacked.view(*packed.shape[:-1], -1).narrow(-1, 0, original_dim).to(torch.int8)
+
 
 def _pack_3bit(indices: torch.Tensor) -> torch.Tensor:
     """8 3-bit values packed into 3 bytes (uint8[3])."""
@@ -82,6 +91,7 @@ def _pack_3bit(indices: torch.Tensor) -> torch.Tensor:
     byte2 = ((v[..., 5] & 0x06) >> 1) | ((v[..., 6] & 0x07) << 2) | ((v[..., 7] & 0x07) << 5)
     packed = torch.stack([byte0, byte1, byte2], dim=-1)
     return packed.view(*indices.shape[:-2], -1)
+
 
 def _unpack_3bit(packed: torch.Tensor, original_dim: int) -> torch.Tensor:
     """Unpack 3-bit values from dense uint8."""
