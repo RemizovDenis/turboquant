@@ -128,9 +128,7 @@ class TurboQuantKVCache:
 
         self.adaptive = None
         if config.enable_adaptive_bitwidth and config.adaptive_bitwidth_config is not None:
-            self.adaptive = AdaptiveBitwidthQuantizer(
-                config.adaptive_bitwidth_config
-            )
+            self.adaptive = AdaptiveBitwidthQuantizer(config.adaptive_bitwidth_config)
 
         log.info("TurboQuantKVCache.init", config=config)
 
@@ -199,7 +197,10 @@ class TurboQuantKVCache:
             return entry
 
     def update(
-        self, entry: CacheEntry | AdaptiveCompressedCache, new_keys: torch.Tensor, new_values: torch.Tensor
+        self,
+        entry: CacheEntry | AdaptiveCompressedCache,
+        new_keys: torch.Tensor,
+        new_values: torch.Tensor,
     ) -> CacheEntry | AdaptiveCompressedCache:
         """Update existing CacheEntry by appending new keys/values."""
         with self._lock:
@@ -231,10 +232,18 @@ class TurboQuantKVCache:
                     torch.cat([entry.compressed_values[1], new_entry.compressed_values[1]], dim=-1),
                 )
                 if entry.residual_keys is not None and new_entry.residual_keys is not None:
-                    entry.residual_keys = torch.cat([entry.residual_keys, new_entry.residual_keys], dim=2)
-                    entry.residual_values = torch.cat([entry.residual_values, new_entry.residual_values], dim=2)
-                    entry.residual_norms_k = torch.cat([entry.residual_norms_k, new_entry.residual_norms_k], dim=2) # type: ignore
-                    entry.residual_norms_v = torch.cat([entry.residual_norms_v, new_entry.residual_norms_v], dim=2) # type: ignore
+                    entry.residual_keys = torch.cat(
+                        [entry.residual_keys, new_entry.residual_keys], dim=2
+                    )
+                    entry.residual_values = torch.cat(
+                        [entry.residual_values, new_entry.residual_values], dim=2
+                    )
+                    entry.residual_norms_k = torch.cat(
+                        [entry.residual_norms_k, new_entry.residual_norms_k], dim=2
+                    )  # type: ignore
+                    entry.residual_norms_v = torch.cat(
+                        [entry.residual_norms_v, new_entry.residual_norms_v], dim=2
+                    )  # type: ignore
 
                 entry.metadata["seq_len"] = seq_old + new_keys.shape[2]
                 return entry

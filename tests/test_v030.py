@@ -187,10 +187,10 @@ class TestTurboQuantV030:
         # 5 high (0.9, 0.8, 0.95, 0.6, 0.75) -> wait, >0.7 threshold
         # Indices: 1 (0.9), 2 (0.8), 4 (0.95), 9 (0.75) -> 4 experts high
 
-        entry = qjl.encode_with_importance(res, importance)
-        assert entry["high_mask"].sum() == 4
+        high_mask, p_h, n_h, p_l, n_l = qjl.encode_with_importance(res, importance)
+        assert high_mask.sum() == 4
 
-        rec = qjl.decode_with_importance(entry)
+        rec = qjl.decode_with_importance(high_mask, p_h, n_h, p_l, n_l, original_shape=res.shape)
         assert rec.shape == res.shape
 
     def test_hadamard_fast_path(self, tq_config):
