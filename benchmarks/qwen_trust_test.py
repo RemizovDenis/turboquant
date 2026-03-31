@@ -90,6 +90,29 @@ def run_trust_test():
     avg_k = total_cossim_k / num_layers
     avg_v = total_cossim_v / num_layers
     
+    # 3. Size Analysis
+    raw_bytes = sum(t.nbytes for layer in past_key_values for t in layer)
+    
+    # Estimate compressed bytes from the last captured CacheEntry (representative)
+    compressed_bytes_per_layer = (
+        entry.compressed_keys[0].nbytes + entry.compressed_keys[1].nbytes +
+        entry.compressed_values[0].nbytes + entry.compressed_values[1].nbytes
+    )
+    if entry.residual_keys is not None:
+        compressed_bytes_per_layer += entry.residual_keys.nbytes + entry.residual_values.nbytes # type: ignore
+        compressed_bytes_per_layer += entry.residual_norms_k.nbytes + entry.residual_norms_v.nbytes # type: ignore
+    
+    total_compressed_bytes = compressed_bytes_per_layer * num_layers
+    compression_ratio = raw_bytes / total_compressed_bytes
+    
+    print("\n" + "="*50)
+    print(f"📊 COMPRESSION ANALYSIS (Qwen2.5-0.5B)")
+    print("-" * 50)
+    print(f"Original Size (FP16):   {raw_bytes / 1024**2:10.2f} MB")
+    print(f"TurboQuant Size (3-bit): {total_compressed_bytes / 1024**2:10.2f} MB")
+    print(f"REAL COMPRESSION RATIO:  {compression_ratio:10.1f}x")
+    print("="*50)
+
     print("\n" + "="*50)
     print(f"{'Layer':<6} | {'Key CosSim':<12} | {'Value CosSim':<12}")
     print("-" * 50)
