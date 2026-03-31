@@ -118,7 +118,7 @@ class TokenImportanceClassifier(nn.Module):
             weights = self.importance_embedding.weight.data
             current = weights[token_ids, 0]
             updated = 0.95 * current + 0.05 * mapped.to(current.device)
-            weights[token_ids, 0] = updated
+            weights[token_ids, 0] = updated.to(weights.dtype)
 
 
 class AdaptiveBitwidthQuantizer:

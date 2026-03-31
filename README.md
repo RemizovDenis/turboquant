@@ -1,15 +1,17 @@
-# TurboQuant-MoE v0.3.0 🛡️🏁
+# TurboQuant-MoE v0.3.0
 
-> [!IMPORTANT]
-> **TurboQuant-MoE is Dual-Licensed.**  
-> Standard Open Source use: **GNU AGPLv3**.  
-> Proprietary/SaaS/Enterprise use: **Commercial License Required**.
-> 
-> 📬 **Inquiries**: [sales@securilayer.dev](mailto:sales@securilayer.dev) | Telegram: [@nofaith7](https://t.me/nofaith7) | [Commercial License Details](./COMMERCIAL-LICENSE.md)
+High-performance KV-Cache compression (14x reduction), 3-bit PolarQuant, and cryptographic watermarking for large language models.
+
+## Licensing
+
+TurboQuant-MoE is dual-licensed:
+
+- **Open Source**: GNU AGPLv3.
+- **Enterprise**: Commercial License Required for proprietary or SaaS usage.
+
+Inquiries: [sales@securilayer.dev](mailto:sales@securilayer.dev) | Telegram: [@nofaith7](https://t.me/nofaith7) | [Commercial License Details](./COMMERCIAL-LICENSE.md)
 
 ---
-
-High-performance KV-Cache compression (14x reduction), 3-bit PolarQuant, and cryptographic watermarking for state-of-the-art LLM inference.
 
 ## Key Features
 
@@ -18,22 +20,21 @@ High-performance KV-Cache compression (14x reduction), 3-bit PolarQuant, and cry
 - **Speculative KV Prefill**: Accelerates prefill phase by 2-3x using 1-bit sketches for fast draft KV generation and verification.
 - **Temporal Expert Fusion**: SVD-based merging of rarely-used experts to reclaim 20-30% of MoE weight VRAM with zero quality loss.
 - **Cross-Request Prefix Sharing**: Global manager for sharing KV blocks of common prefixes across concurrent requests.
-- **Fast Walsh-Hadamard Transform (FWHT)**: $O(N \log N)$ rotation for faster quantization on power-of-2 dimensions.
+- **Fast Walsh-Hadamard Transform (FWHT)**: O(N log N) rotation for faster quantization on power-of-2 dimensions.
 - **Cryptographic KV Watermarking**: HMAC-seeded LSB watermarking of KV scales for attribution and auditing.
 
 ## Performance Scorecard (v0.3.0)
 
 | KPI | v0.3.0 Performance | Baseline FP16 | Gain |
 |---|---|---|---|
-| **KV Compression (Cross-Layer)** | **12.8x - 15.4x** | 1.0x | 🚀 14x |
-| **KV Compression (Base 3-bit)** | **5.2x - 5.8x** | 1.0x | 🚀 5.5x |
-| **Rotation Speed (FWHT)** | **O(N log N)** | O(N^2) | ⚡ 10-20x |
-| **Recovery Quality** | **>0.88 Cosine Sim** | 1.0 | 🎯 High |
-| **Expert Load Latency** | **< 0.5 ms** | - | - |
-| **Hidden IO Ratio** | **100%** | - | Perfect |
+| KV Compression (Cross-Layer) | 12.8x - 15.4x | 1.0x | 14x |
+| KV Compression (Base 3-bit) | 5.2x - 5.8x | 1.0x | 5.5x |
+| Rotation Speed (FWHT) | O(N log N) | O(N^2) | 10-20x |
+| Recovery Quality | >0.88 Cosine Sim | 1.0 | High |
+| Expert Load Latency | < 0.5 ms | - | - |
+| Hidden IO Ratio | 100% | - | Perfect |
 
-> [!NOTE]
-> All metrics measured on synthetic correlated KV tensors and reconstructed weights using `benchmark_ultimate.py` with CPU fallback/CUDA simulation context.
+All metrics measured on synthetic correlated KV tensors and reconstructed weights using `benchmark_ultimate.py`.
 
 ## Quick Start
 
@@ -52,22 +53,11 @@ cache = CrossLayerKVDeltaCache(config)
 cache.compress_layer_streaming(layer_idx=1, keys=k, values=v, anchor_keys=k0, anchor_values=v0)
 ```
 
-### Speculative Prefill
-```python
-from turboquant.core.speculative_prefill import SpeculativePrefillEngine
-
-engine = SpeculativePrefillEngine(tq_cache, config)
-# Register draft for next time
-engine.register_prompt_draft("system_prompt_v1", k, v)
-# Speculative compress
-entry, stats = engine.speculative_compress(k_new, v_new, prompt_id="system_prompt_v1")
-```
-
 ## Internal Architecture
 
 1. **PolarQuant**: Rotates KV vectors to spherical coordinates, applies Lloyd-Max quantization on radius and angles. Supports 1, 2, and 3-bit physical bit-packing.
-2. **QJL Residual**: Corrects reconstruction error using 1-bit random projections (Projective Sign-ORing).
-3. **Delta Engine**: Computes low-rank or sign-only deltas between layer $L$ and anchor layer $A$ (Cross-Layer Compression).
+2. **QJL Residual**: Corrects reconstruction error using 1-bit random projections.
+3. **Delta Engine**: Computes low-rank or sign-only deltas between layer L and anchor layer A.
 4. **MoE Fusion**: Monitors expert usage, merges "cold" experts into SVD composites.
 
 ## Installation

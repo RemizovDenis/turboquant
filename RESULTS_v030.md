@@ -1,4 +1,4 @@
-# TurboQuant-MoE v0.3.0 — Benchmark Report
+# TurboQuant-MoE v0.3.0  Benchmark Report
 Date: 2026-03-31
 
 ## Summary
