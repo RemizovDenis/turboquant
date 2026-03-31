@@ -1,48 +1,55 @@
-# Python
+# --- TurboQuant-MoE .gitignore ---
+
+# Virtual environments (must be ignored)
+.venv/
+venv/
+env/
+ENV/
+
+# Python bytecode/cache
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
-*.egg-info/
-dist/
-build/
-*.egg
-.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.nox/
+.tox/
 
-# Virtual environments
-venv/
-.venv/
-env/
+# Project results & artifacts
+results/*.html
+benchmark_results/*.html
+*.safetensors
+*.onnx
+*.log
+*.json
+!benchmark_ultimate_m4.json
+!pyproject.toml
+!prometheus.yml
+!.env.example
+
+# Environment & local settings
 .env
-
-# IDE
+.DS_Store
 .vscode/
 .idea/
 *.swp
 *.swo
-*~
-.DS_Store
 
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-.mypy_cache/
-.ruff_cache/
-
-# Benchmark results (generated)
-benchmark_results/
-results/benchmark_*.json
-results/report_*.html
-
-# Calibration files
-*.safetensors
-
-# ONNX exports
-*.onnx
+# Build & distribution
+build/
+dist/
+*.egg-info/
+*.egg
 
 # Docker
 .docker/
+docker-compose.override.yml
 
-# OS
+# OS-specific
 Thumbs.db
+Desktop.ini
+v030_fix/
+v030_ci_fix/
