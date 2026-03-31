@@ -112,6 +112,10 @@ class InMemoryTurboQuant(TurboQuantVectorAdapter):
         # Reshape for KV cache compression
         tensor = torch.from_numpy(vectors.astype(np.float32)).unsqueeze(1).unsqueeze(1)
         entry = self.cache.compress(tensor, tensor)
+        from turboquant.core.turboquant import CacheEntry
+
+        if not isinstance(entry, CacheEntry):
+            raise TypeError(f"Vector DB requires standard CacheEntry, got {type(entry)}")
         packed, scales = entry.compressed_keys
         compressed = CompressedVectors(
             packed=packed.cpu().numpy(),

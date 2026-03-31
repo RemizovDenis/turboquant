@@ -31,6 +31,9 @@ class QJLConfig:
 class QJLResidualCorrector(nn.Module):
     """1-bit residual corrector using JL random projections (v0.3.0)."""
 
+    S: torch.Tensor
+    powers: torch.Tensor
+
     def __init__(
         self,
         config: QJLConfig | None = None,
@@ -85,7 +88,7 @@ class QJLResidualCorrector(nn.Module):
         norms = residual.float().norm(dim=-1).to(torch.float16)
 
         # 2. Project
-        sketch = cast(torch.Tensor, self.S).to(residual.device)
+        sketch = self.S.to(residual.device)
         proj = residual.float() @ sketch.T
 
         # 3. Packed signs
@@ -113,7 +116,7 @@ class QJLResidualCorrector(nn.Module):
         signs = signs01 * 2.0 - 1.0  # (..., k)
 
         # 2. Project back
-        sketch = cast(torch.Tensor, self.S).to(packed_bits.device)
+        sketch = self.S.to(packed_bits.device)
         correction = signs @ sketch  # (..., D)
 
         # 3. Rescale
@@ -167,7 +170,7 @@ class AdaptiveQJLCorrector(nn.Module):
 
     def encode_with_importance(
         self, residual: torch.Tensor, importance_scores: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         """Vectorized importance-based routing."""
         high_mask = importance_scores > 0.7
         res_high = residual[high_mask]
@@ -177,7 +180,7 @@ class AdaptiveQJLCorrector(nn.Module):
         p_l, n_l = self.low.encode(res_low) if res_low.numel() > 0 else (None, None)
 
         # Return a flat tuple for JIT/TorchScript compatibility instead of a dict
-        return high_mask, p_h, n_h, p_l, n_l  # type: ignore
+        return high_mask, p_h, n_h, p_l, n_l
 
     def decode_with_importance(
         self,
