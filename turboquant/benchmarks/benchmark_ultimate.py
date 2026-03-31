@@ -81,7 +81,7 @@ class UltimateBenchmark:
             rows.append(
                 {
                     "seq_len": seq,
-                    "fp16_mb": mem["packed_mb"] / (mem["ratio"] if mem["ratio"] > 0 else 1),
+                    "fp16_mb": mem["total_mb"] / (mem["ratio"] if mem["ratio"] > 0 else 1),
                     "compressed_mb": mem["total_mb"],
                     "ratio_x": 1.0 / max(mem["ratio"], 1e-9),
                     "cosine_sim": quality["keys_cosine_sim"],
