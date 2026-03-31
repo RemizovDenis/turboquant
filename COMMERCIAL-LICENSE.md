@@ -1,38 +1,37 @@
-# TurboQuant-MoE Commercial License
+# TurboQuant-MoE Commercial License & Support Agreement
 
-**Version 1.0**  
+**Version 1.1**  
 **Effective Date: March 31, 2026**  
-**Copyright (c) 2026 Denis Remizov (SecuriLayer)**
+**Authoritative Issuer: SecuriLayer (Denis Remizov)**
 
-This Commercial License is a paid alternative to the open-source license provided with TurboQuant. It is designed for organizations that wish to integrate TurboQuant technology into proprietary, closed-source products, services, or infrastructures without the constraints of open-source reciprocal requirements.
+This Commercial License is a mandatory legal agreement for any entity utilizing TurboQuant-MoE technology in a proprietary, non-reciprocal, or closed-source capacity. TurboQuant-MoE is dual-licensed under **GNU AGPLv3** (for open-source compliance) and this **Commercial License** (for proprietary integration).
 
-## 1. Granted Rights
-Under this license, the Licensee is granted a non-exclusive, worldwide, perpetual right to:
-- Integrate TurboQuant into commercial software and SaaS platforms.
-- Modify the source code for internal or external commercial use.
-- Distribute products powered by TurboQuant without disclosing proprietary source code.
+## 1. Compliance Notice
+Utilization of TurboQuant-MoE in a SaaS, closed-source product, or proprietary enterprise infrastructure **without** a valid Commercial License is a violation of the GNU AGPLv3 "remote network interaction" clause.
 
-## 2. Tiers & Pricing (One-time payment per organization)
-We offer a tiered pricing model based on company scale and revenue:
+## 2. Granted Proprietary Rights
+SecuriLayer grants the Licensee a non-exclusive, worldwide, irrevocable (upon full payment) right to:
+- Embed TurboQuant-MoE into closed-source commercial applications.
+- Utilize TurboQuant-MoE within private cloud infrastructures without reciprocal disclosure.
+- Access priority security patches and custom architectural audit services.
 
-| Tier | Organization Size / Revenue | One-time Fee |
+## 3. Tiered Licensing & Enterprise Pricing
+Fees are structured as a one-time perpetual license per organization:
+
+| Tier | Organization Profile | License Fee (One-time) |
 | :--- | :--- | :--- |
-| **Startup** | Revenue < $1M USD / Year | **$4,999 USD** |
-| **Professional** | Revenue $1M - $10M USD / Year | **$14,999 USD** |
-| **Enterprise** | Revenue > $10M USD / Custom Needs | **$29,999+ USD** |
+| **Startup** | Early-stage / Revenue < $1M | **$4,999 USD** |
+| **Professional** | Mid-market / Revenue $1M - $10M | **$14,999 USD** |
+| **Enterprise** | Large Scale / High Revenue | **$29,999+ USD** |
 
-*For volume discounts or custom integration terms, please contact: [turboquant@securilayer.dev](mailto:turboquant@securilayer.dev)*
+## 4. Enforcement & Watermarking
+Commercial Licensees are entitled to specialized watermarking configurations for data attribution and internal audit trails, integrated with our HMAC-seeded LSB engine.
 
-## 3. Commercial Benefits
-- **Proprietary Integration**: Full right to keep your derivative works closed-source.
-- **Priority Support**: Access to direct technical consulting and custom integration paths.
-- **Indemnification**: Commercial-grade assurance and removal of any non-commercial branding/watermarking requirements.
+## 5. Procurement & Contact
+To initiate the licensing process, request a formal quote, or inquire about volume discounts, contact our Corporate Sales Department:
 
-## 4. Restrictions
-This license does **not** grant the right to:
-- Resell TurboQuant as a standalone library or a competing quantization service.
-- Transfer this license to third parties without written consent from SecuriLayer.
+-   **Email**: [sales@securilayer.dev](mailto:sales@securilayer.dev)
+-   **Telegram (direct)**: [@nofaith7](https://t.me/nofaith7)
 
-## 5. Contact
-To initiate a purchase or request a formal invoice, please reach out to our legal department at:  
-**turboquant@securilayer.dev**
+---
+*Failure to obtain a license while using TurboQuant-MoE in a closed-source commercial setting may result in legal action under AGPLv3 compliance enforcement.*

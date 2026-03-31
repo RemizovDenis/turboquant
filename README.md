@@ -5,10 +5,13 @@ Includes 3-bit PolarQuant, 14x memory reduction, and HMAC-seeded LSB watermarkin
 
 ## Dual Licensing Model
 
-TurboQuant is released under a dual-licensing model to support both open-source development and professional commercial enterprise:
+TurboQuant-MoE is released under a strict dual-licensing model for project stability and commercial sustainability:
 
--   **MIT License**: For open-source, educational, and personal non-commercial use.
--   **Commercial License**: Required for integration into proprietary products, closed-source SaaS platforms, or large-scale enterprise deployments. (See [COMMERCIAL-LICENSE.md](./COMMERCIAL-LICENSE.md))
+-   **GNU AGPLv3**: For open-source, non-commercial, and educational use. Any derivative works or network deployments must remain open-source.
+-   **Commercial License**: Required for all proprietary integrations, closed-source SaaS platforms, and internal enterprise architectures.
+
+For commercial procurement and support:
+📩 **Email**: [sales@securilayer.dev](mailto:sales@securilayer.dev) | 📱 **Telegram**: [@nofaith7](https://t.me/nofaith7)
 
 ---
 
