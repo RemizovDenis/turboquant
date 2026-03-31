@@ -9,6 +9,16 @@ TurboQuant-MoE is a production-grade KV-cache compression and dynamic expert man
 3. **Cross-Layer Delta**: Multi-layer KV sharing with signed delta propagation (14.6x compression).
 4. **MoE Expert Fusion**: Dynamic temporal SVD fusion of expert weights based on access frequency.
 
+## 📈 Verified Performance
+
+| Architecture | Context Model | Compression | Fidelity (CosSim) | Status |
+| :--- | :--- | :--- | :--- | :--- |
+| **TQK Baseline** | Qwen2.5-0.5B | 1.0x (FP16) | 1.0 | ✅ PASS |
+| **TurboQuant 3-bit** | Qwen2.5-0.5B | **8.5x** | **0.8919** | ✅ VERIFIED |
+
+> [!TIP]
+> Details on methodology and bit-exactness analysis are available in the [**Official Trust Report (Qwen2.5)**](./TRUST_REPORT.md).
+
 ## Installation
 
 ```bash
