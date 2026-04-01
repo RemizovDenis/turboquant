@@ -56,4 +56,8 @@ Detailed documentation and metrics are available in the `/docs` directory:
 
 ## License
 
-MIT (Core Library). Commercial licensing available for proprietary deployments (see [Licensing](./docs/licensing.md)).
+License: Business Source License 1.1
+Commercial use requires a license agreement.
+Non-commercial use is free.
+Converts to Apache 2.0 on 2030-04-01.
+Contact: github.com/RemizovDenis

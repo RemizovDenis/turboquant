@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Denis Remizov. Licensed under BUSL-1.1.
+# See LICENSE file for details.
+
+
 """Speculative KV Prefill for TurboQuant.
 
 Speeds up the prefill phase by predicting approximate KV-cache vectors

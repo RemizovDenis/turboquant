@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Denis Remizov. Licensed under BUSL-1.1.
+# See LICENSE file for details.
+
+
 """TurboQuant-MoE v0.3.0 Ultimate Benchmark Suite.
 
 Comprehensive performance, memory, and quality evaluation for:

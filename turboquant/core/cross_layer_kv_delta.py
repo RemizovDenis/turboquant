@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Denis Remizov. Licensed under BUSL-1.1.
+# See LICENSE file for details.
+
+
 """Cross-Layer KV Delta Compression for TurboQuant.
 
 Achieves 11-14x compression by exploiting inter-layer KV similarity

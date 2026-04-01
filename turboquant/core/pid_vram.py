@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Denis Remizov. Licensed under BUSL-1.1.
+# See LICENSE file for details.
+
+
 """PID-based VRAM controller for dynamic MoE expert cache sizing."""
 
 from __future__ import annotations

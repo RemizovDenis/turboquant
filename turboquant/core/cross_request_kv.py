@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Denis Remizov. Licensed under BUSL-1.1.
+# See LICENSE file for details.
+
+
 """Cross-Request KV Cache Sharing for server inference.
 
 Optimizes VRAM usage by sharing compressed KV blocks for common prefixes
