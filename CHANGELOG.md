@@ -2,6 +2,12 @@
 
 All notable changes to the TurboQuant project will be documented in this file.
 
+## [Unreleased]
+### Changed
+- README rewritten for reproducible source installation and clearer CI/release status visibility.
+- Added repository standards files: `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `SUPPORT.md`.
+- Added GitHub collaboration scaffolding: `CODEOWNERS`, PR template, and issue templates.
+
 ## [0.3.1-stable] - 2026-03-31
 - Corrected Ruff import sorting across core modules.
 - Fixed TypeError in QJL adaptive tests by updating API calls.
