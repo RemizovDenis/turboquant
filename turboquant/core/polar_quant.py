@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Denis Remizov. Licensed under BUSL-1.1.
+# See LICENSE file for details.
+
+
 """PolarQuantizer: True 3-bit KV-cache quantization (arXiv 2504.19874).
 
 Implements the first stage of the TurboQuant algorithm with true packed

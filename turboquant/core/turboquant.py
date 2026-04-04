@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Denis Remizov. Licensed under BUSL-1.1.
+# See LICENSE file for details.
+
+
 """Core TurboQuant KV-cache manager v0.3.0.
 
 Unified KV-cache compressor with true packed 3-bit storage,

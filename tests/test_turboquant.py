@@ -228,3 +228,53 @@ class TestVectorDB:
 
         with pytest.raises(ValueError):
             create_adapter("unknown", config)
+
+    def test_search_handles_non_finite_vectors(self, monkeypatch):
+        from turboquant.core.turboquant import TurboQuantConfig
+        from turboquant.integrations.vector_db import CompressedVectors, InMemoryTurboQuant
+
+        config = TurboQuantConfig(head_dim=8, num_heads=1, device="cpu")
+        adapter = InMemoryTurboQuant(config)
+
+        adapter._compressed = CompressedVectors(
+            packed=np.zeros((2, 1), dtype=np.uint8),
+            scales=np.ones((2, 1), dtype=np.float32),
+            original_shape=(2, 8),
+            original_dtype=np.dtype(np.float32),
+            metadata={"n": 2, "d": 8},
+        )
+        adapter._ids = ["a", "b"]
+        adapter._payloads = [{}, {}]
+
+        bad_vectors = np.array(
+            [[np.nan, np.inf, -np.inf, 0, 0, 0, 0, 0], [1e30, -1e30, 0, 0, 0, 0, 0, 0]],
+            dtype=np.float32,
+        )
+        monkeypatch.setattr(adapter, "decompress_embeddings", lambda _: bad_vectors)
+
+        results = adapter.search(np.zeros((8,), dtype=np.float32), top_k=2)
+        assert len(results) == 2
+        assert all(np.isfinite(r.score) for r in results)
+
+    def test_search_query_dimension_mismatch(self, monkeypatch):
+        from turboquant.core.turboquant import TurboQuantConfig
+        from turboquant.integrations.vector_db import CompressedVectors, InMemoryTurboQuant
+
+        config = TurboQuantConfig(head_dim=8, num_heads=1, device="cpu")
+        adapter = InMemoryTurboQuant(config)
+        adapter._compressed = CompressedVectors(
+            packed=np.zeros((1, 1), dtype=np.uint8),
+            scales=np.ones((1, 1), dtype=np.float32),
+            original_shape=(1, 8),
+            original_dtype=np.dtype(np.float32),
+            metadata={"n": 1, "d": 8},
+        )
+        adapter._ids = ["a"]
+        adapter._payloads = [{}]
+        # Keep test focused on query shape validation, not compression internals.
+        monkeypatch.setattr(
+            adapter, "decompress_embeddings", lambda _: np.zeros((1, 8), dtype=np.float32)
+        )
+
+        with pytest.raises(ValueError, match="query dim mismatch"):
+            adapter.search(np.zeros((4,), dtype=np.float32), top_k=1)

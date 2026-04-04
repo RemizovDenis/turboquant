@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Denis Remizov. Licensed under BUSL-1.1.
+# See LICENSE file for details.
+
+
 """Triton-accelerated kernels for TurboQuant.
 
 Falls back to pure PyTorch if triton is not available.

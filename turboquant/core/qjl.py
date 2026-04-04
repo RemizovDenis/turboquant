@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Denis Remizov. Licensed under BUSL-1.1.
+# See LICENSE file for details.
+
+
 """QJL residual correction using 1-bit random projections.
 
 Optimised for norm-preserving encoding and adaptive sketching in TurboQuant v0.3.0.

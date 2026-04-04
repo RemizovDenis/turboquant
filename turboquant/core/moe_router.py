@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Denis Remizov. Licensed under BUSL-1.1.
+# See LICENSE file for details.
+
+
 """MoE router optimizer with pruning, capacity control, and balancing losses."""
 
 from __future__ import annotations

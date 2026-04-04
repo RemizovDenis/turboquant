@@ -2,6 +2,10 @@
 
 All notable changes to the TurboQuant project will be documented in this file.
 
+## [0.3.1-stable] - 2026-03-31
+- Corrected Ruff import sorting across core modules.
+- Fixed TypeError in QJL adaptive tests by updating API calls.
+
 ## [0.3.0] - 2026-03-31
 ### Added
 - **True 3-bit PolarQuant**: Implemented physical bit-packing (8x3-bit into 3x8-byte) for 5.3x - 6.0x compression of KV cache.
@@ -24,4 +28,8 @@ All notable changes to the TurboQuant project will be documented in this file.
 - Enhanced telemetry with `hidden_io_percent` and `overall_compression_x`.
 
 ## [0.1.1] - 2026-03-27
-- Initial release with PolarQuant (int8 container) and QJL.
+- Fixes for PolarQuant int8 packing containers and QJL initialization.
+
+## [0.1.0] - 2026-03-26
+- Initial public release of core TurboQuant engine.
+- Implementation of PolarQuant and QJL residuals.

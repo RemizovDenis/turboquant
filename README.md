@@ -1,14 +1,23 @@
 # TurboQuant-MoE
 
-TurboQuant-MoE is a production-grade KV-cache compression and dynamic expert management engine for large language models (LLMs). It implements advanced 1, 2, and 3-bit polar quantization with JL residual correction to achieve significant VRAM reduction with zero recall loss.
+TurboQuant-MoE is a KV-cache compression and dynamic expert management engine for large language models (LLMs). It implements 1, 2, and 3-bit polar quantization with QJL residual correction to reduce VRAM footprint while maintaining high fidelity.
 
 ## Architecture Highlights
 
 1. **PolarQuant**: Spherical coordinate rotation with Lloyd-Max quantization on radius and angles.
 2. **QJL Residual**: 1-bit Johnson-Lindenstrauss random projection for error correction.
-3. **Cross-Layer Delta**: Multi-layer KV sharing with signed delta propagation (14.6x compression).
+3. **Cross-Layer Delta**: Multi-layer KV sharing with signed delta propagation (up to 14.6x Extreme Mode compression).
 4. **MoE Expert Fusion**: Dynamic temporal SVD fusion of expert weights based on access frequency.
 
+## 📈 Verified Performance
+
+| Architecture | Context Model | Compression | Fidelity (CosSim) | Status |
+| :--- | :--- | :--- | :--- | :--- |
+| **TQK Baseline** | Qwen2.5-0.5B | 1.0x (FP16/Precision) | 1.0 | ✅ PASS |
+| **TurboQuant (Trust)** | Qwen2.5-0.5B | **8.5x** | **0.8919** | ✅ VERIFIED |
+
+> [!TIP]
+> Details on methodology and bit-exactness analysis are available in the [**Official Trust Report (Qwen2.5)**](./TRUST_REPORT.md).
 ## Installation
 
 ```bash
@@ -41,9 +50,13 @@ Detailed documentation and metrics are available in the `/docs` directory:
 ## Integration Status
 
 - **HuggingFace Transformers**: Drop-in `TurboQuantCache` provider.
-- **Vector Databases**: 4x compression adapters for Qdrant, ChromaDB, and NumPy.
-- **On-Device**: Optimized for zero-loss long context on mobile/consumer hardware.
+- **Vector Databases**: 4x compression adapters for Qdrant, ChromaDB, and NumPy with NaN/Inf-safe cosine search path.
+- **On-Device**: Optimized for high-fidelity long-context inference on consumer hardware.
 
 ## License
 
-MIT (Core Library). Commercial licensing available for proprietary deployments (see [Licensing](./docs/licensing.md)).
+License: Business Source License 1.1
+Commercial use requires a license agreement.
+Non-commercial use is free.
+Converts to Apache 2.0 on 2030-04-01.
+Contact: github.com/RemizovDenis

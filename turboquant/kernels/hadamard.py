@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Denis Remizov. Licensed under BUSL-1.1.
+# See LICENSE file for details.
+
+
 """Fast Walsh-Hadamard Transform for TurboQuant.
 
 Provides efficient O(n log n) orthonormal transforms to replace O(n^2)
