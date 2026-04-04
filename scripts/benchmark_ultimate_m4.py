@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import math
 import os
@@ -12,6 +13,8 @@ import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
 
 try:
     import psutil
@@ -25,8 +28,6 @@ try:
     import requests
 except ModuleNotFoundError as exc:  # pragma: no cover - import guard for local runners
     raise SystemExit("Missing dependency: requests. Install with `pip install requests`.") from exc
-
-from turboquant.benchmarks.field_report import render_field_markdown, summarize_field_results
 
 OLLAMA_BASE = "http://127.0.0.1:11434"
 TQ_PROXY = "http://127.0.0.1:11435"
@@ -291,6 +292,16 @@ def _is_localhost_url(url: str) -> bool:
     return host in {"127.0.0.1", "localhost", "::1"}
 
 
+def _load_field_report_helpers() -> tuple[Any, Any]:
+    module_path = ROOT_DIR / "turboquant" / "benchmarks" / "field_report.py"
+    spec = importlib.util.spec_from_file_location("turboquant_field_report_local", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Failed to load report module: {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.render_field_markdown, module.summarize_field_results
+
+
 def start_tq_proxy(ollama_base: str, proxy_url: str) -> subprocess.Popen[str]:
     env = os.environ.copy()
     env["OLLAMA_HOST"] = ollama_base
@@ -329,6 +340,8 @@ def stop_tq_proxy(proc: subprocess.Popen[str]) -> None:
 
 
 def main() -> None:
+    render_field_markdown, summarize_field_results = _load_field_report_helpers()
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
     parser.add_argument("--runs", type=int, default=10)
