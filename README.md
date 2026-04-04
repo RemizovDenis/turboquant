@@ -51,7 +51,7 @@ Detailed documentation and metrics are available in the `/docs` directory:
 ## Integration Status
 
 - **HuggingFace Transformers**: Drop-in `TurboQuantCache` provider.
-- **Vector Databases**: 4x compression adapters for Qdrant, ChromaDB, and NumPy.
+- **Vector Databases**: 4x compression adapters for Qdrant, ChromaDB, and NumPy with NaN/Inf-safe cosine search path.
 - **On-Device**: Optimized for zero-loss long context on mobile/consumer hardware.
 
 ## License
