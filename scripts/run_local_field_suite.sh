@@ -17,6 +17,21 @@ if [[ -z "${PY_BIN}" ]]; then
   PY_BIN="python3"
 fi
 
+AUTO_INSTALL_DEPS="${AUTO_INSTALL_DEPS:-1}"
+if [[ "${AUTO_INSTALL_DEPS}" == "1" ]]; then
+  "${PY_BIN}" - <<'PY'
+import importlib.util
+import subprocess
+import sys
+
+required = ["psutil", "requests"]
+missing = [name for name in required if importlib.util.find_spec(name) is None]
+if missing:
+    print(f"[INFO] Installing missing benchmark dependencies: {', '.join(missing)}")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", *missing])
+PY
+fi
+
 STAMP="$(date +%Y%m%d_%H%M%S)"
 OUT_DIR="${OUT_DIR:-results/field_local/${STAMP}}"
 PROFILE="${PROFILE:-real}"
