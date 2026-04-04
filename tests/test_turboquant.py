@@ -272,7 +272,9 @@ class TestVectorDB:
         adapter._ids = ["a"]
         adapter._payloads = [{}]
         # Keep test focused on query shape validation, not compression internals.
-        monkeypatch.setattr(adapter, "decompress_embeddings", lambda _: np.zeros((1, 8), dtype=np.float32))
+        monkeypatch.setattr(
+            adapter, "decompress_embeddings", lambda _: np.zeros((1, 8), dtype=np.float32)
+        )
 
         with pytest.raises(ValueError, match="query dim mismatch"):
             adapter.search(np.zeros((4,), dtype=np.float32), top_k=1)
