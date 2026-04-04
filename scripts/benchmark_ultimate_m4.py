@@ -11,9 +11,22 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
-import psutil
-import requests
+try:
+    import psutil
+except ModuleNotFoundError as exc:  # pragma: no cover - import guard for local runners
+    raise SystemExit(
+        "Missing dependency: psutil. Install with `pip install psutil` or "
+        "`pip install -e '.[benchmark]'`."
+    ) from exc
+
+try:
+    import requests
+except ModuleNotFoundError as exc:  # pragma: no cover - import guard for local runners
+    raise SystemExit("Missing dependency: requests. Install with `pip install requests`.") from exc
+
+from turboquant.benchmarks.field_report import render_field_markdown, summarize_field_results
 
 OLLAMA_BASE = "http://127.0.0.1:11434"
 TQ_PROXY = "http://127.0.0.1:11435"
@@ -190,13 +203,16 @@ def run_latency_suite(base_url: str, model: str, runs: int) -> dict[str, Any]:
         )
 
     mem_after = ollama_rss_mb()
+    ttft_values = [v for v in ttfts if not math.isnan(v)]
+    tps_values = [v for v in tps if not math.isnan(v)]
+
     return {
         "runs": details,
         "latency_p50_ms": statistics.median(latencies),
         "latency_p95_ms": p95(latencies),
         "latency_avg_ms": statistics.fmean(latencies),
-        "ttft_avg_ms": statistics.fmean([v for v in ttfts if not math.isnan(v)]),
-        "tokens_per_second_avg": statistics.fmean([v for v in tps if not math.isnan(v)]),
+        "ttft_avg_ms": statistics.fmean(ttft_values) if ttft_values else math.nan,
+        "tokens_per_second_avg": statistics.fmean(tps_values) if tps_values else math.nan,
         "memory_before_mb": mem_before,
         "memory_after_mb": mem_after,
         "memory_delta_mb": mem_after - mem_before,
@@ -248,19 +264,37 @@ def run_needle_suite(base_url: str, model: str, model_ctx_limit: int) -> dict[st
     return out
 
 
-def read_tq_status() -> dict[str, Any]:
+def read_tq_status(proxy_url: str) -> dict[str, Any]:
     try:
-        resp = requests.get(f"{TQ_PROXY}/tq/status", timeout=5)
+        resp = requests.get(f"{proxy_url}/tq/status", timeout=5)
         resp.raise_for_status()
         return resp.json()
     except requests.RequestException:
         return {}
 
 
-def start_tq_proxy() -> subprocess.Popen[str]:
+def _proxy_port(proxy_url: str) -> str:
+    parsed = urlparse(proxy_url)
+    if parsed.port is not None:
+        return str(parsed.port)
+    if _is_localhost_url(proxy_url):
+        return "11435"
+    if parsed.scheme == "https":
+        return "443"
+    if parsed.scheme == "http":
+        return "80"
+    return "11435"
+
+
+def _is_localhost_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
+def start_tq_proxy(ollama_base: str, proxy_url: str) -> subprocess.Popen[str]:
     env = os.environ.copy()
-    env["OLLAMA_HOST"] = OLLAMA_BASE
-    env["PROXY_PORT"] = "11435"
+    env["OLLAMA_HOST"] = ollama_base
+    env["PROXY_PORT"] = _proxy_port(proxy_url)
     candidates = [
         Path(env.get("VIRTUAL_ENV", "")) / "bin" / "turboquant-proxy",
         Path(".venv/bin/turboquant-proxy"),
@@ -282,7 +316,7 @@ def start_tq_proxy() -> subprocess.Popen[str]:
         text=True,
         env=env,
     )
-    wait_http(f"{TQ_PROXY}/health", timeout_s=120)
+    wait_http(f"{proxy_url}/health", timeout_s=120)
     return proc
 
 
@@ -294,96 +328,90 @@ def stop_tq_proxy(proc: subprocess.Popen[str]) -> None:
         proc.kill()
 
 
-def write_readme(results: dict[str, Any], path: Path) -> None:
-    lines = [
-        "# TurboQuant Ultimate Benchmark (M4 Air + Ollama)",
-        "",
-        f"Generated: `{results['timestamp']}`",
-        "",
-    ]
-    for model, data in results["models"].items():
-        lines += [
-            f"## {model}",
-            "",
-            "| Mode | p50 latency (ms) | p95 latency (ms) | Avg TTFT (ms) | Avg tokens/s | RSS delta (MB) |",
-            "|---|---:|---:|---:|---:|---:|",
-            (
-                f"| Baseline | {data['baseline']['latency_p50_ms']:.1f} | "
-                f"{data['baseline']['latency_p95_ms']:.1f} | "
-                f"{data['baseline']['ttft_avg_ms']:.1f} | "
-                f"{data['baseline']['tokens_per_second_avg']:.2f} | "
-                f"{data['baseline']['memory_delta_mb']:.1f} |"
-            ),
-            (
-                f"| TurboQuant Proxy | {data['turboquant']['latency_p50_ms']:.1f} | "
-                f"{data['turboquant']['latency_p95_ms']:.1f} | "
-                f"{data['turboquant']['ttft_avg_ms']:.1f} | "
-                f"{data['turboquant']['tokens_per_second_avg']:.2f} | "
-                f"{data['turboquant']['memory_delta_mb']:.1f} |"
-            ),
-            "",
-            f"- Speedup (latency avg): `{data['speedup_x']:.3f}x`",
-            f"- Memory delta improvement: `{data['memory_saved_mb']:.1f} MB`",
-            f"- KV compression ratio (proxy monitor): `{data['kv_compression_ratio']:.3f}x`",
-            "",
-        ]
-    path.write_text("\n".join(lines), encoding="utf-8")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
     parser.add_argument("--runs", type=int, default=10)
     parser.add_argument("--out-json", default="benchmark_ultimate_m4.json")
     parser.add_argument("--out-readme", default="README_benchmark.md")
+    parser.add_argument("--output-dir", default="results/field_local")
+    parser.add_argument("--skip-pull", action="store_true")
+    parser.add_argument("--no-proxy", action="store_true")
+    parser.add_argument("--ollama-url", default=OLLAMA_BASE)
+    parser.add_argument("--proxy-url", default=TQ_PROXY)
     args = parser.parse_args()
 
-    wait_http(f"{OLLAMA_BASE}/api/tags")
+    ollama_base = args.ollama_url.rstrip("/")
+    proxy_url = args.proxy_url.rstrip("/")
+
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_json = out_dir / Path(args.out_json).name
+    out_readme = out_dir / Path(args.out_readme).name
+
+    wait_http(f"{ollama_base}/api/tags")
 
     results: dict[str, Any] = {"timestamp": now_iso(), "host": "localhost", "models": {}}
     total_mem_saved = 0.0
 
     for model in args.models:
-        print(f"[INFO] Pull/check model: {model}")
-        try:
-            pull_model(OLLAMA_BASE, model)
-        except requests.RequestException as exc:
-            print(f"[WARN] model pull failed for {model}: {exc}")
-            results["models"][model] = {"error": f"pull_failed: {exc}"}
-            continue
+        if not args.skip_pull:
+            print(f"[INFO] Pull/check model: {model}")
+            try:
+                pull_model(ollama_base, model)
+            except requests.RequestException as exc:
+                print(f"[WARN] model pull failed for {model}: {exc}")
+                results["models"][model] = {"error": f"pull_failed: {exc}"}
+                continue
 
-        ctx_limit = model_context_limit(OLLAMA_BASE, model)
+        ctx_limit = model_context_limit(ollama_base, model)
         print(f"[INFO] Model context limit for {model}: {ctx_limit}")
 
         print(f"[INFO] Baseline suite: {model}")
-        baseline_speed = run_latency_suite(OLLAMA_BASE, model, args.runs)
-        baseline_needle = run_needle_suite(OLLAMA_BASE, model, ctx_limit)
+        baseline_speed = run_latency_suite(ollama_base, model, args.runs)
+        baseline_needle = run_needle_suite(ollama_base, model, ctx_limit)
 
-        print(f"[INFO] TurboQuant proxy suite: {model}")
-        proc = start_tq_proxy()
-        try:
-            tq_speed = run_latency_suite(TQ_PROXY, model, args.runs)
-            tq_needle = run_needle_suite(TQ_PROXY, model, ctx_limit)
-            tq_status = read_tq_status()
-        finally:
-            stop_tq_proxy(proc)
+        tq_speed: dict[str, Any] = {}
+        tq_needle: dict[str, Any] = {}
+        tq_status: dict[str, Any] = {}
+        speedup_x: float | None = None
+        mem_saved: float | None = None
+        kv_ratio: float | None = None
+        proxy_error: str | None = None
 
-        speedup_x = baseline_speed["latency_avg_ms"] / max(1e-9, tq_speed["latency_avg_ms"])
-        mem_saved = baseline_speed["memory_delta_mb"] - tq_speed["memory_delta_mb"]
-        total_mem_saved += mem_saved
+        if args.no_proxy:
+            proxy_error = "proxy_disabled_by_flag"
+        else:
+            print(f"[INFO] TurboQuant proxy suite: {model}")
+            proc: subprocess.Popen[str] | None = None
+            try:
+                if _is_localhost_url(proxy_url):
+                    proc = start_tq_proxy(ollama_base, proxy_url)
+                else:
+                    wait_http(f"{proxy_url}/health")
+                tq_speed = run_latency_suite(proxy_url, model, args.runs)
+                tq_needle = run_needle_suite(proxy_url, model, ctx_limit)
+                tq_status = read_tq_status(proxy_url)
+                speedup_x = baseline_speed["latency_avg_ms"] / max(1e-9, tq_speed["latency_avg_ms"])
+                mem_saved = baseline_speed["memory_delta_mb"] - tq_speed["memory_delta_mb"]
+                total_mem_saved += mem_saved if mem_saved is not None else 0.0
 
-        kv_ratio = 1.0
-        try:
-            mem = tq_status.get("memory", {})
-            # Proxy report may expose compression as saved vs original; fallback to 1.0.
-            if "kv_compression_ratio" in mem:
-                kv_ratio = float(mem["kv_compression_ratio"])
-            elif "total_saved_mb" in mem and "total_kv_mb" in mem and float(mem["total_kv_mb"]) > 0:
-                kv_ratio = float(mem["total_kv_mb"]) / max(
-                    1e-9, float(mem["total_kv_mb"]) - float(mem["total_saved_mb"])
-                )
-        except Exception:
-            kv_ratio = 1.0
+                mem = tq_status.get("memory", {})
+                if "kv_compression_ratio" in mem:
+                    kv_ratio = float(mem["kv_compression_ratio"])
+                elif (
+                    "total_saved_mb" in mem
+                    and "total_kv_mb" in mem
+                    and float(mem["total_kv_mb"]) > 0
+                ):
+                    kv_ratio = float(mem["total_kv_mb"]) / max(
+                        1e-9, float(mem["total_kv_mb"]) - float(mem["total_saved_mb"])
+                    )
+            except Exception as exc:  # noqa: BLE001
+                proxy_error = str(exc)
+            finally:
+                if proc is not None:
+                    stop_tq_proxy(proc)
 
         results["models"][model] = {
             "baseline": baseline_speed,
@@ -395,14 +423,17 @@ def main() -> None:
             "speedup_x": speedup_x,
             "memory_saved_mb": mem_saved,
             "kv_compression_ratio": kv_ratio,
+            "proxy_error": proxy_error,
         }
 
-    out_json = Path(args.out_json)
+    summary = summarize_field_results(results)
+    results["summary"] = summary
     out_json.write_text(json.dumps(results, indent=2), encoding="utf-8")
-    write_readme(results, Path(args.out_readme))
+    out_readme.write_text(render_field_markdown(results, summary), encoding="utf-8")
 
     print(json.dumps(results, indent=2))
     print(f"\nSaved: {out_json.resolve()}")
+    print(f"Report: {out_readme.resolve()}")
     print(f"TurboQuant saves {total_mem_saved / 1024.0:.3f} GB on M4 Air")
 
 

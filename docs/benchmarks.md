@@ -22,6 +22,23 @@ This document consolidates performance metrics for TurboQuant-MoE v0.3.x across 
 
 Results are based on initial proxy-benchmarking for v0.3.1-next.
 
+### Reproducible local run (no cloud)
+
+```bash
+./scripts/run_local_field_suite.sh
+```
+
+For a stricter local matrix with Mixtral:
+
+```bash
+PROFILE=real MODELS="mixtral:latest mistral:latest llama3.1:latest" ./scripts/run_local_field_suite.sh
+```
+
+The command generates:
+
+- `results/field_local/<timestamp>/benchmark_ultimate_m4.json`
+- `results/field_local/<timestamp>/README_benchmark.md`
+
 ### mistral:latest (7B)
 - **Baseline Average**: 13.69 tokens/s
 - **TurboQuant Proxy**: 5.64 tokens/s (current overhead 2.4x)

@@ -21,7 +21,12 @@ TurboQuant-MoE is a KV-cache compression and dynamic expert management engine fo
 ## Installation
 
 ```bash
-pip install turboquant-moe
+git clone https://github.com/RemizovDenis/turboquant.git
+cd turboquant
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+pip install -e ".[dev,transformers,benchmark]"
 ```
 
 ## Quick Start (KV Cache Compression)
@@ -46,6 +51,25 @@ Detailed documentation and metrics are available in the `/docs` directory:
 - [Technical Benchmarks (A100 & Apple Silicon)](./docs/benchmarks.md)
 - [Outreach Strategy & Partnership Targets](./docs/strategy.md)
 - [Commercial Licensing Details](./docs/licensing.md)
+
+## Local Field Benchmark (M4, no cloud required)
+
+Run the full local benchmark matrix for Ollama baseline vs TurboQuant proxy:
+
+```bash
+./scripts/run_local_field_suite.sh
+```
+
+Real Mixtral-focused run (default profile already includes `mixtral:latest`):
+
+```bash
+PROFILE=real MODELS="mixtral:latest mistral:latest llama3.1:latest" ./scripts/run_local_field_suite.sh
+```
+
+Artifacts:
+
+- `results/field_local/<timestamp>/benchmark_ultimate_m4.json`
+- `results/field_local/<timestamp>/README_benchmark.md`
 
 ## Integration Status
 
