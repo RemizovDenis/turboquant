@@ -12,7 +12,7 @@ import time
 import uuid
 from collections.abc import Awaitable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -162,7 +162,11 @@ class InMemoryTurboQuant(TurboQuantVectorAdapter):
         norms = np.linalg.norm(x.astype(np.float64), axis=1, keepdims=True).astype(np.float32)
         norms = np.where(norms > 1e-9, norms, 1.0).astype(np.float32)
         normalized = x / norms
-        return np.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0)
+        sanitized = cast(
+            np.ndarray[Any, np.dtype[np.float32]],
+            np.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0),
+        )
+        return sanitized
 
     def search(
         self, query: np.ndarray[Any, np.dtype[np.float32]], top_k: int
