@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Denis Remizov. Licensed under BUSL-1.1.
+# See LICENSE file for details.
+
+
 """Adaptive per-token bitwidth quantization for KV cache."""
 
 from __future__ import annotations

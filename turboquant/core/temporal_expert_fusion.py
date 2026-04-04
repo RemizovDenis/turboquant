@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Denis Remizov. Licensed under BUSL-1.1.
+# See LICENSE file for details.
+
+
 """Temporal Expert Fusion for MoE.
 
 Reduces MoE weight footprint by merging rarely-used experts via

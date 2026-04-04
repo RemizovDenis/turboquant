@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Denis Remizov. Licensed under BUSL-1.1.
+# See LICENSE file for details.
+
+
 """TurboQuant core quantization modules v0.3.0."""
 
 from turboquant.core.cross_layer_kv_delta import CrossLayerDeltaConfig, CrossLayerKVDeltaCache

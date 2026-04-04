@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Denis Remizov. Licensed under BUSL-1.1.
+# See LICENSE file for details.
+
+
 """Kernel helpers for TurboQuant v0.3.0."""
 
 from turboquant.kernels.hadamard import (

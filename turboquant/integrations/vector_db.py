@@ -1,3 +1,7 @@
+# Copyright (c) 2026 Denis Remizov. Licensed under BUSL-1.1.
+# See LICENSE file for details.
+
+
 """TurboQuant adapters for vector databases."""
 
 from __future__ import annotations
@@ -147,17 +151,59 @@ class InMemoryTurboQuant(TurboQuantVectorAdapter):
         )
         return res
 
+    @staticmethod
+    def _safe_unit_normalize(
+        matrix: np.ndarray[Any, np.dtype[np.float32]],
+    ) -> np.ndarray[Any, np.dtype[np.float32]]:
+        """Normalize rows while guarding against NaN/Inf and zero-norm vectors."""
+        x = np.asarray(matrix, dtype=np.float32)
+        x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        # Use float64 accumulation to avoid overflow in norm calculation.
+        norms = np.linalg.norm(x.astype(np.float64), axis=1, keepdims=True).astype(np.float32)
+        norms = np.where(norms > 1e-9, norms, 1.0).astype(np.float32)
+        normalized = x / norms
+        return np.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0)
+
     def search(
         self, query: np.ndarray[Any, np.dtype[np.float32]], top_k: int
     ) -> list[SearchResult]:
         if self._compressed is None:
             return []
+        if top_k <= 0:
+            return []
+
         vectors = self.decompress_embeddings(self._compressed)
-        q = query.reshape(1, -1).astype(np.float32)
-        q = q / (np.linalg.norm(q, axis=1, keepdims=True) + 1e-9)
-        v = vectors / (np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-9)
-        sims = (v @ q.T).squeeze(-1)
-        top_idx = np.argsort(-sims)[:top_k]
+        if query.ndim != 1:
+            raise ValueError("query must be 1D")
+        if vectors.ndim != 2:
+            raise ValueError("index vectors must be 2D")
+        if query.shape[0] != vectors.shape[1]:
+            raise ValueError(
+                f"query dim mismatch: got {query.shape[0]}, expected {vectors.shape[1]}"
+            )
+
+        q = self._safe_unit_normalize(query.reshape(1, -1))
+        v = self._safe_unit_normalize(vectors)
+        v = np.clip(v, -1.0, 1.0)
+        q = np.clip(q, -1.0, 1.0)
+        # Use float64 accumulation in similarity to avoid overflow warnings on extreme values.
+        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+            sims64 = np.matmul(v.astype(np.float64, copy=False), q.T.astype(np.float64, copy=False))
+        sims = np.nan_to_num(
+            sims64.squeeze(-1).astype(np.float32, copy=False),
+            nan=-1.0,
+            posinf=1.0,
+            neginf=-1.0,
+        )
+
+        valid_n = min(len(self._ids), len(self._payloads), int(sims.shape[0]))
+        if valid_n == 0:
+            return []
+        if valid_n < sims.shape[0]:
+            sims = sims[:valid_n]
+
+        k = min(int(top_k), int(valid_n))
+        top_idx = np.argsort(-sims)[:k]
 
         out: list[SearchResult] = []
         for i in top_idx.tolist():
